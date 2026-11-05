@@ -187,6 +187,20 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(call("POST", "/api/correspondences", {"scope": "external", "direction": "incoming",
                          "subject": "s", "party": "p", "doc_date": "غير"}, t)[0], 400)
 
+    def test_09b_read_state_and_kpi(self):
+        cid = self.corr(self.tok["clerk1"], subject="غير مقروءة للمدير")[1]["id"]
+        d = call("GET", "/api/correspondences?read=unread&direction=incoming", token=self.tok["mgr1"])[1]
+        self.assertEqual(d["kpi"]["unread"], d["total"])  # المدير لا يراها ضمن مؤشراته إن لم تكن إدارته
+        a = call("GET", "/api/correspondences?read=unread", token=self.admin)[1]
+        self.assertTrue(any(i["id"] == cid and not i["is_read"] for i in a["items"]))
+        self.assertEqual(call("GET", f"/api/correspondences/{cid}", token=self.admin)[0], 200)
+        a2 = call("GET", "/api/correspondences?read=unread", token=self.admin)[1]
+        self.assertFalse(any(i["id"] == cid for i in a2["items"]))
+        mine = call("GET", "/api/correspondences?read=read&has_att=1&period=today&sort=old", token=self.tok["clerk1"])
+        self.assertEqual(mine[0], 200)
+        self.assertEqual(call("POST", "/api/correspondences/read", {"ids": [cid]}, self.tok["clerk1"])[0], 200)
+        self.assertEqual(call("POST", "/api/correspondences/read", {"ids": ["x"]}, self.tok["clerk1"])[0], 400)
+
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
         self.assertGreater(d["total"], 0)

@@ -3,8 +3,8 @@
 // كل النصوص تُدرج عبر textContent لمنع هجمات XSS.
 
 const L = {
-  status: { new: "جديدة", in_progress: "قيد المعالجة", referred: "محالة", closed: "منجزة", archived: "مؤرشفة" },
-  priority: { normal: "عادية", high: "مهمة", urgent: "عاجلة" },
+  status: { new: "جديد", in_progress: "جارٍ", referred: "محال", closed: "منجز", archived: "مؤرشف" },
+  priority: { normal: "طبيعي", high: "هام", urgent: "عاجل" },
   conf: ["عادي", "سري", "سري للغاية"],
   role: { admin: "مدير النظام", manager: "مدير إدارة", clerk: "مكتب الصادر والوارد", employee: "موظف" },
   scope: { external: "خارجي", internal: "داخلي" },
@@ -82,10 +82,8 @@ const NAV = [
   ["#/tasks", "معاملاتي"],
   ["#/new", "تسجيل مراسلة جديدة"],
   ["sep", "المراسلات"],
-  ["#/list?scope=external&direction=incoming", "الوارد الخارجي"],
-  ["#/list?scope=external&direction=outgoing", "الصادر الخارجي"],
-  ["#/list?scope=internal&direction=incoming", "الوارد الداخلي"],
-  ["#/list?scope=internal&direction=outgoing", "الصادر الداخلي"],
+  ["#/list?direction=incoming", "الوارد"],
+  ["#/list?direction=outgoing", "الصادر"],
   ["#/list", "كل المراسلات"],
 ];
 const ADMIN_NAV = [["sep", "الإدارة"], ["#/admin/users", "المستخدمون والإدارات"], ["#/admin/audit", "سجل التدقيق"], ["#/admin/integration", "التكامل (API)"]];
@@ -94,7 +92,7 @@ function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
   const items = [...NAV, ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
     href === "sep" ? h("div", { class: "sep" }, label)
-      : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?scope=")) ? "active" : "" },
+      : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?")) ? "active" : "" },
         label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null));
   return h("div", { class: "shell" },
     h("nav", { class: "side", "aria-label": "القائمة الرئيسية" },
@@ -154,10 +152,10 @@ async function dashboardView() {
     const seg = (cls, n) => { const s = h("div", { class: "seg " + cls, title: n }); s.style.height = (n / max) * 100 + "%"; return s; };
     return h("div", { class: "col" }, h("div", { class: "stack" }, seg("out", out), seg("in", inn)), h("div", { class: "small muted ltr" }, m));
   }) : h("div", { class: "empty" }, "لا بيانات بعد"));
-  const typeRows = ["external", "internal"].flatMap((s) => ["incoming", "outgoing"].map((dir) => {
-    const n = (d.by_type.find((t) => t.scope === s && t.direction === dir) || {}).n || 0;
-    return stat(n, `${L.direction[dir]} ${L.scope[s]}`, `#/list?scope=${s}&direction=${dir}`);
-  }));
+  const typeRows = ["incoming", "outgoing"].map((dir) => {
+    const n = (s) => (d.by_type.find((t) => t.scope === s && t.direction === dir) || {}).n || 0;
+    return stat(n("external") + n("internal"), `${L.direction[dir]} (خارجي ${n("external")} · داخلي ${n("internal")})`, `#/list?direction=${dir}`);
+  });
   return [h("h2", {}, "لوحة المعلومات"),
     h("div", { class: "grid g4" }, stat(d.total, "إجمالي المراسلات", "#/list"), stat(d.my_tasks, "إحالات بانتظارك", "#/tasks"),
       stat(d.overdue, "متأخرة عن موعدها", "#/list?overdue=1", true), stat(d.urgent_open, "عاجلة مفتوحة", "#/list?priority=urgent")),
@@ -187,36 +185,108 @@ function corrTable(items, compact) {
       compact ? null : h("td", {}, c.assignee_name || "—"))))));
 }
 
+const PRIO_ICON = { urgent: "❗", high: "⚑", normal: "✋" };
+
 async function listView(q) {
-  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine"];
+  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size"];
   const params = new URLSearchParams();
   filters.forEach((k) => q.get(k) && params.set(k, q.get(k)));
   const page = Number(q.get("page") || 1);
   params.set("page", page);
   const data = await api("/correspondences?" + params);
-  const form = h("form", { class: "card toolbar", onsubmit: (e) => {
-    e.preventDefault();
+  const dir = q.get("direction");
+  const title = { incoming: "البريد الوارد", outgoing: "البريد الصادر" }[dir] || "كل المراسلات";
+  const subtitle = { incoming: "إدارة الرسائل والمراسلات الواردة", outgoing: "إدارة الرسائل والمراسلات الصادرة" }[dir] || "كل الوارد والصادر، الداخلي والخارجي";
+  const base = new URLSearchParams();
+  ["scope", "direction"].forEach((k) => q.get(k) && base.set(k, q.get(k)));
+  const link = (extra) => "#/list?" + new URLSearchParams({ ...Object.fromEntries(base), ...extra });
+
+  const apply = () => {
     const p = new URLSearchParams();
     for (const k of filters) { const el = form.elements[k]; if (el && el.value) p.set(k, el.value); }
+    if (q.get("direction") && !p.get("direction")) p.set("direction", q.get("direction"));
     if (q.get("overdue")) p.set("overdue", "1");
     if (q.get("mine")) p.set("mine", "1");
     location.hash = "#/list?" + p;
-  } },
-    h("div", {}, h("label", {}, "بحث (الموضوع، الرقم، الجهة)"), h("input", { name: "q", value: q.get("q") || "" })),
-    h("div", {}, h("label", {}, "النطاق"), sel("scope", { "": "الكل", ...L.scope }, q.get("scope"))),
-    h("div", {}, h("label", {}, "الاتجاه"), sel("direction", { "": "الكل", ...L.direction }, q.get("direction"))),
-    h("div", {}, h("label", {}, "الحالة"), sel("status", { "": "الكل", ...L.status }, q.get("status"))),
-    h("div", {}, h("label", {}, "الأولوية"), sel("priority", { "": "الكل", ...L.priority }, q.get("priority"))),
-    h("div", {}, h("label", {}, "الإدارة"), sel("dept", { "": "الكل", ...Object.fromEntries(state.depts.map((d) => [d.id, d.name])) }, q.get("dept"))),
-    h("div", {}, h("label", {}, "من تاريخ"), h("input", { type: "date", name: "from", value: q.get("from") || "" })),
-    h("div", {}, h("label", {}, "إلى تاريخ"), h("input", { type: "date", name: "to", value: q.get("to") || "" })),
-    h("div", { class: "fixed row" }, h("button", { class: "btn" }, "بحث"),
-      isStaff() ? h("button", { type: "button", class: "btn ghost", onclick: () => exportCsv(params) }, "تصدير CSV") : null));
+  };
+  const dd = (name, label, opts) => sel(name, opts, q.get(name), { "aria-label": label, onchange: apply });
+  const depts = { "": "كل الإدارات", ...Object.fromEntries(state.depts.map((d) => [d.id, d.name])) };
+  const form = h("form", { class: "card filters", onsubmit: (e) => { e.preventDefault(); apply(); } },
+    h("div", { class: "frow" },
+      h("input", { name: "q", type: "search", placeholder: "ابحث باسم المرسل أو موضوع الرسالة أو رقم المعاملة…", "aria-label": "بحث", value: q.get("q") || "", class: "grow" }),
+      dd("status", "حالة المعاملة", { "": "حالة المعاملة", ...L.status }),
+      dd("priority", "الأولوية", { "": "الأولوية", ...L.priority }),
+      dd("read", "حالة القراءة", { "": "حالة القراءة", unread: "غير مقروءة", read: "مقروءة" }),
+      dd("has_att", "المرفقات", { "": "المرفقات", 1: "مع مرفقات" }),
+      dd("period", "الفترة الزمنية", { "": "الفترة الزمنية", today: "اليوم", week: "آخر 7 أيام", month: "آخر شهر", year: "آخر سنة" }),
+      dd("sort", "الترتيب", { "": "الأحدث أولًا", old: "الأقدم أولًا" })),
+    h("details", { class: "more", open: !!(q.get("scope") || q.get("dept") || q.get("from") || q.get("to")) },
+      h("summary", {}, "مزيد من الفلاتر"),
+      h("div", { class: "frow" },
+        dd("scope", "نوع البريد", { "": "داخلي وخارجي", ...L.scope }), dd("dept", "الإدارة", depts),
+        h("input", { type: "date", name: "from", "aria-label": "من تاريخ", value: q.get("from") || "", onchange: apply }),
+        h("input", { type: "date", name: "to", "aria-label": "إلى تاريخ", value: q.get("to") || "", onchange: apply }),
+        isStaff() ? h("button", { type: "button", class: "btn ghost sm", onclick: () => exportCsv(params) }, "تصدير CSV") : null)));
+
+  const k = data.kpi;
+  const kpi = (cls, icon, n, label, href) => h("a", { class: "kpi " + cls, href }, h("div", { class: "ico" }, icon), h("div", {}, h("div", { class: "n" }, n), h("div", { class: "l" }, label)));
+  const kpis = h("div", { class: "kpis" },
+    kpi("k-total", "📥", k.total, "إجمالي " + (dir === "outgoing" ? "الصادر" : dir === "incoming" ? "الوارد" : "المراسلات"), link({})),
+    kpi("k-unread", "✉️", k.unread, "غير مقروءة", link({ read: "unread" })),
+    kpi("k-prog", "🕓", k.in_progress, "قيد المعالجة", link({ status: "in_progress" })),
+    kpi("k-urgent", "⏰", k.urgent, "عاجلة", link({ priority: "urgent" })));
+
+  // التحديد الجماعي
+  const sel$ = new Set();
+  const bar = h("div", { class: "bulk", hidden: true });
+  const checks = [];
+  const refreshBar = () => {
+    bar.hidden = sel$.size === 0;
+    bar.replaceChildren(h("span", {}, `المحدد: ${sel$.size}`), h("button", { type: "button", class: "btn sm", onclick: async () => {
+      try { await api("/correspondences/read", { method: "POST", body: { ids: [...sel$] } }); toast("تم التعليم كمقروء"); render(); } catch (e) { toast(e.message, true); }
+    } }, "تعليم كمقروء"));
+    all.checked = sel$.size === data.items.length && data.items.length > 0;
+    checks.forEach(([id, el]) => { el.checked = sel$.has(id); el.closest("tr").classList.toggle("sel", el.checked); });
+  };
+  const all = h("input", { type: "checkbox", "aria-label": "تحديد الكل", onchange: () => { data.items.forEach((c) => (all.checked ? sel$.add(c.id) : sel$.delete(c.id))); refreshBar(); } });
+
+  const timeOf = (s) => { const d = new Date(s.replace(" ", "T")); return d.toLocaleTimeString("ar-u-nu-latn", { hour: "2-digit", minute: "2-digit", hour12: true }); };
+  const rows = data.items.map((c) => {
+    const cb = h("input", { type: "checkbox", "aria-label": "تحديد", onchange: () => { cb.checked ? sel$.add(c.id) : sel$.delete(c.id); refreshBar(); } });
+    checks.push([c.id, cb]);
+    return h("tr", { class: c.is_read ? "" : "unread" },
+      h("td", {}, cb),
+      h("td", { class: "nowrap" }, h("span", { class: "dot " + (c.is_read ? "r" : "u") }), c.is_read ? "مقروءة" : "غير مقروءة"),
+      h("td", {}, c.party, h("div", { class: "small muted" }, typeLabel(c))),
+      h("td", { class: "subj" }, h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null),
+      h("td", { class: "ltr nowrap" }, c.ref_no),
+      h("td", { class: "nowrap" }, c.created_at.slice(0, 10).replaceAll("-", "/"), h("div", { class: "small muted" }, timeOf(c.created_at))),
+      h("td", {}, pill("pr-" + c.priority, `${PRIO_ICON[c.priority]} ${L.priority[c.priority]}`)),
+      h("td", {}, statusPill(c.status)),
+      h("td", { class: "nowrap" }, c.att_count ? `📎 ${c.att_count}` : "—"),
+      h("td", { class: "acts" },
+        h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "عرض", "aria-label": "عرض" }, "👁"),
+        h("a", { class: "iconbtn", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&subject=${encodeURIComponent("رد: " + c.subject)}`, title: "رد", "aria-label": "رد" }, "↩"),
+        h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "إحالة", "aria-label": "إحالة" }, "↪")));
+  });
+  const table = rows.length ? h("div", { class: "tbl-wrap" }, h("table", { class: "mail" },
+    h("thead", {}, h("tr", {}, h("th", {}, all), ["حالة القراءة", "المرسل / الجهة", "موضوع الرسالة", "رقم المعاملة", "تاريخ الاستلام", "الأولوية", "حالة المعاملة", "المرفقات", "الإجراءات"].map((t) => h("th", {}, t)))),
+    h("tbody", {}, rows))) : h("div", { class: "card empty" }, "لا توجد مراسلات مطابقة");
+
   const pages = Math.max(1, Math.ceil(data.total / data.size));
   const go = (p) => { const n = new URLSearchParams(params); n.set("page", p); location.hash = "#/list?" + n; };
-  return [h("h2", {}, "المراسلات", h("span", { class: "muted small" }, ` (${data.total})`)), form, corrTable(data.items),
-    h("div", { class: "pager" }, h("button", { class: "btn ghost sm", disabled: page <= 1, onclick: () => go(page - 1) }, "السابق"),
-      h("span", {}, `صفحة ${page} من ${pages}`), h("button", { class: "btn ghost sm", disabled: page >= pages, onclick: () => go(page + 1) }, "التالي"))];
+  const nums = [...new Set([1, page - 1, page, page + 1, pages].filter((p) => p >= 1 && p <= pages))].sort((a, b) => a - b);
+  const pager = h("div", { class: "pager2" },
+    h("div", { class: "pgs" },
+      h("button", { class: "pg", disabled: page <= 1, onclick: () => go(page - 1), "aria-label": "السابق" }, "›"),
+      nums.map((p, i) => [i && p - nums[i - 1] > 1 ? h("span", { class: "muted" }, "…") : null, h("button", { class: "pg" + (p === page ? " on" : ""), onclick: () => go(p) }, p)]),
+      h("button", { class: "pg", disabled: page >= pages, onclick: () => go(page + 1), "aria-label": "التالي" }, "‹"),
+      h("label", { class: "size" }, "عدد الصفوف في الصفحة", sel("size", { 10: "10", 25: "25", 50: "50", 100: "100" }, data.size, { onchange: (e) => { const n = new URLSearchParams(params); n.set("size", e.target.value); n.set("page", 1); location.hash = "#/list?" + n; } }))),
+    h("div", { class: "muted small" }, `إجمالي ${data.total} مراسلة • الصفحة ${page} من ${pages}`));
+
+  return [h("div", { class: "page-head" }, h("div", { class: "ph-ico" }, dir === "outgoing" ? "📤" : "📥"), h("div", {}, h("h2", {}, title), h("div", { class: "muted small" }, subtitle)),
+    h("a", { class: "btn", href: `#/new?direction=${dir || "incoming"}` }, "+ تسجيل جديد")),
+    kpis, form, bar, table, pager];
 }
 
 function sel(name, opts, val, extra) {
@@ -274,8 +344,8 @@ function newView(q) {
     } catch (ex) { err.textContent = ex.message; }
   } },
     h("div", { class: "form-grid" },
-      f("النطاق", sel("scope", scopes, q.get("scope") || (canExternal ? "external" : "internal"), { required: true }), true),
-      f("الاتجاه", sel("direction", L.direction, q.get("direction") || "incoming", { required: true }), true),
+      f("الاتجاه (وارد / صادر)", sel("direction", L.direction, q.get("direction") || "incoming", { required: true }), true),
+      f("نوع البريد (داخلي / خارجي)", sel("scope", scopes, q.get("scope") || (canExternal ? "external" : "internal"), { required: true }), true),
       f("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, value: q.get("subject") || "" }), true, "span2"),
       f("الجهة (المرسِل / المرسَل إليه)", h("input", { name: "party", required: true, maxlength: 200 }), true),
       f("رقم مرجع الجهة", h("input", { name: "party_ref", maxlength: 100 })),

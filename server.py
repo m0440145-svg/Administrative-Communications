@@ -79,6 +79,9 @@ CREATE TABLE IF NOT EXISTS transfers(
   instruction TEXT, due_date TEXT, status TEXT NOT NULL DEFAULT 'pending',
   note TEXT, created_at TEXT NOT NULL, done_at TEXT);
 CREATE INDEX IF NOT EXISTS ix_t_to ON transfers(to_user, status);
+CREATE TABLE IF NOT EXISTS reads(
+  corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
+  at TEXT NOT NULL, PRIMARY KEY(corr_id, user_id));
 CREATE TABLE IF NOT EXISTS audit_log(
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, user_id INTEGER, username TEXT, action TEXT NOT NULL,
   entity TEXT, entity_id INTEGER, detail TEXT, ip TEXT);
@@ -452,6 +455,16 @@ def build_filters(ctx):
                      "AND c.status NOT IN('closed','archived')")
     if q.get("mine") == "1":
         where.append("c.assigned_to=?"); p.append(u["id"])
+    if q.get("read") in ("read", "unread"):
+        where.append(("" if q["read"] == "read" else "NOT ") +
+                     "EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)")
+        p.append(u["id"])
+    if q.get("has_att") == "1":
+        where.append("EXISTS(SELECT 1 FROM attachments x WHERE x.corr_id=c.id)")
+    since = {"today": "date('now','localtime')", "week": "date('now','localtime','-6 days')",
+             "month": "date('now','localtime','-1 month')", "year": "date('now','localtime','-1 year')"}.get(q.get("period"))
+    if since:
+        where.append(f"c.created_at>={since}")
     s = (q.get("q") or "").strip()[:100]
     if s:
         k = like(s)
@@ -467,10 +480,41 @@ def list_corr(ctx):
     page = max(1, int(ctx.query.get("page", "1")) if ctx.query.get("page", "1").isdigit() else 1)
     size = min(100, int(ctx.query["size"])) if ctx.query.get("size", "").isdigit() and int(ctx.query["size"]) > 0 else 20
     total = ctx.conn.execute(f"SELECT COUNT(*) {JOINS} WHERE {where}", p).fetchone()[0]
+    extra = ("(SELECT COUNT(*) FROM attachments x WHERE x.corr_id=c.id) AS att_count, "
+             "EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?) AS is_read")
+    order = "ASC" if ctx.query.get("sort") == "old" else "DESC"
     rows = ctx.conn.execute(
-        f"SELECT {FIELDS} {JOINS} WHERE {where} ORDER BY c.id DESC LIMIT ? OFFSET ?",
-        p + [size, (page - 1) * size]).fetchall()
-    return 200, {"total": total, "page": page, "size": size, "items": [dict(r) for r in rows]}
+        f"SELECT {FIELDS}, {extra} {JOINS} WHERE {where} ORDER BY c.id {order} LIMIT ? OFFSET ?",
+        [ctx.user["id"]] + p + [size, (page - 1) * size]).fetchall()
+    # مؤشرات الصفحة: تتبع النطاق والاتجاه فقط وتتجاهل بقية الفلاتر
+    vs, vp = visible_clause(ctx.user)
+    base, bp = [vs], list(vp)
+    for k in ("scope", "direction"):
+        if ctx.query.get(k) in ("external", "internal", "incoming", "outgoing"):
+            base.append(f"c.{k}=?"); bp.append(ctx.query[k])
+    bw = " AND ".join(base)
+
+    def n(extra_sql="", params=()):
+        return ctx.conn.execute(f"SELECT COUNT(*) FROM correspondences c WHERE {bw} {extra_sql}",
+                                bp + list(params)).fetchone()[0]
+    kpi = {"total": n(),
+           "unread": n("AND NOT EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)", [ctx.user["id"]]),
+           "in_progress": n("AND c.status='in_progress'"),
+           "urgent": n("AND c.priority='urgent' AND c.status NOT IN('closed','archived')")}
+    return 200, {"total": total, "page": page, "size": size, "kpi": kpi, "items": [dict(r) for r in rows]}
+
+
+@route("POST", r"/api/correspondences/read")
+def mark_read(ctx):
+    ids = ctx.body.get("ids")
+    if not isinstance(ids, list) or len(ids) > 200 or not all(isinstance(i, int) for i in ids):
+        raise ApiError(400, "قائمة غير صالحة")
+    vs, vp = visible_clause(ctx.user)
+    with tx(ctx.conn):
+        for i in ids:
+            if ctx.conn.execute(f"SELECT 1 FROM correspondences c WHERE c.id=? AND {vs}", [i] + vp).fetchone():
+                ctx.conn.execute("INSERT OR IGNORE INTO reads VALUES(?,?,?)", (i, ctx.user["id"], now()))
+    return 200, {"ok": True}
 
 
 @route("POST", r"/api/correspondences")
@@ -519,6 +563,7 @@ def create_corr(ctx):
             (ref, scope, direction, subject, summary, party, party_ref, pdept, doc_date, category, priority, conf,
              status, dept, assigned, due, parent, u["id"], now(), now()))
         cid = cur.lastrowid
+        conn.execute("INSERT INTO reads VALUES(?,?,?)", (cid, u["id"], now()))
         if assigned:
             conn.execute("INSERT INTO transfers(corr_id,from_user,to_user,instruction,due_date,created_at) VALUES(?,?,?,?,?,?)",
                          (cid, u["id"], assigned, "إسناد عند التسجيل", due, now()))
@@ -533,6 +578,7 @@ def get_corr(ctx):
     cid = int(ctx.params["id"])
     get_visible(ctx, cid)
     conn = ctx.conn
+    conn.execute("INSERT OR IGNORE INTO reads VALUES(?,?,?)", (cid, ctx.user["id"], now()))
     c = dict(conn.execute(f"SELECT {FIELDS} {JOINS} WHERE c.id=?", (cid,)).fetchone())
     c["attachments"] = [dict(r) for r in conn.execute(
         "SELECT a.id,a.filename,a.size,a.sha256,a.created_at,u.full_name AS uploader FROM attachments a "
