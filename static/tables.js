@@ -78,3 +78,9 @@
   let t = null;
   new MutationObserver(() => { clearTimeout(t); t = setTimeout(enhance, 60); }).observe(document.getElementById("app"), { childList: true, subtree: true });
 })();
+
+// سباق التحميل: إن اكتمل أول عرض (تسجيل الدخول أو الصفحة) قبل تحميل ملفات التحسين اللاحقة، يُعاد رسمه مرة واحدة بها
+(() => {
+  const late = document.querySelector("#app > .login") || (document.querySelector("nav.side") && !document.querySelector(".topbar"));
+  if (late && typeof render === "function") render();
+})();

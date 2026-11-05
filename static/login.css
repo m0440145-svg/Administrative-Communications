@@ -1,17 +1,61 @@
-/* صفحة الدخول */
-.lg-page{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);min-height:100vh;min-height:100dvh}
-.lg-brand{background:linear-gradient(160deg,var(--side),color-mix(in srgb,var(--side) 70%,var(--brand-2)));color:#fff;display:flex;align-items:center;padding:48px 56px}
-.lg-brand-in{max-width:520px}
-.lg-logo{display:inline-flex;background:#fff;border-radius:14px;padding:10px;margin-bottom:20px}.lg-logo-img{max-height:72px;max-width:200px;object-fit:contain;display:block}
-.lg-brand h1{font-size:30px;line-height:1.4;margin:0 0 6px}.lg-tag{font-size:17px;opacity:.92;margin:0 0 14px}.lg-msg{background:#ffffff22;border-radius:10px;padding:10px 14px;margin:0 0 18px}
-.lg-feats{list-style:none;margin:22px 0 0;padding:0;display:grid;gap:14px}.lg-feats li{display:flex;gap:12px;align-items:flex-start;line-height:1.7}.lg-feats svg{flex:none;margin-top:3px;opacity:.95}
-.lg-main{display:flex;align-items:center;justify-content:center;padding:32px 20px;background:var(--bg)}
-.lg-card{width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:30px}
-.lg-form h2{margin:0 0 4px;font-size:24px}.lg-form .field label{display:block;margin-bottom:6px;font-size:15px;color:var(--ink);font-weight:600}
-.lg-form input{width:100%;min-height:46px;font-size:16px;border-radius:10px}
-.lg-pw{position:relative}.lg-pw input{padding-inline-end:48px}
-.lg-eye{position:absolute;inset-inline-end:2px;top:2px;width:44px;height:42px;border:0;background:transparent;color:var(--muted);cursor:pointer;border-radius:8px;display:flex;align-items:center;justify-content:center}.lg-eye:hover{color:var(--ink)}
-.lg-err{color:var(--danger);font-size:15px;min-height:22px;margin:6px 0}.lg-hint{color:var(--accent);font-size:14px;margin-top:4px}
-.lg-submit{width:100%;min-height:48px;font-size:17px;border-radius:10px}.lg-submit:disabled{opacity:.6;cursor:progress}
-.lg-help,.lg-note{text-align:center;margin:14px 0 0}.lg-note{border-top:1px solid var(--line);padding-top:14px;margin-top:20px}
-@media (max-width:860px){.lg-page{grid-template-columns:1fr}.lg-brand{padding:28px 22px}.lg-feats{display:none}.lg-brand h1{font-size:24px}.lg-main{align-items:flex-start;padding-top:20px}}
+/* صفحة الدخول — «وصال»: عاجي + كحلي + برتقالي، بخط Tajawal المستضاف محليًا (للصفحة فقط) */
+@font-face{font-family:"Tajawal";src:url("/fonts/Tajawal-Regular.ttf") format("truetype");font-weight:400;font-display:swap}
+@font-face{font-family:"Tajawal";src:url("/fonts/Tajawal-Medium.ttf") format("truetype");font-weight:500;font-display:swap}
+@font-face{font-family:"Tajawal";src:url("/fonts/Tajawal-Bold.ttf") format("truetype");font-weight:700;font-display:swap}
+
+/* الصفحة بألوانها الثابتة بصرف النظر عن السمة الداكنة (هوية الدخول) */
+.lg-page{--lg-navy:#0b2545;--lg-navy-2:#13315c;--lg-orange:#f28c28;--lg-orange-d:#d9731a;--lg-ivory:#faf6ec;
+  --panel:#fff;--ink:#1d2433;--muted:#667085;--line:#e6dfce;--danger:#b42318;--accent:#b45309;--brand-2:var(--lg-orange);
+  font-family:"Tajawal","Segoe UI",Tahoma,sans-serif;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);min-height:100vh;min-height:100dvh;color:var(--ink)}
+.lg-page *{font-family:inherit}
+
+/* القسم التعريفي الكحلي */
+.lg-brand{position:relative;overflow:hidden;background:radial-gradient(120% 90% at 85% 0%,var(--lg-navy-2) 0%,var(--lg-navy) 60%);color:#fff;display:flex;align-items:center;padding:48px 56px}
+.lg-brand::before{content:"";position:absolute;inset-inline-end:-120px;bottom:-140px;width:380px;height:380px;border-radius:50%;border:2px solid #ffffff14}
+.lg-brand-in{position:relative;max-width:560px;width:100%}
+.lg-id{display:flex;align-items:center;gap:14px;margin-bottom:30px}.lg-id svg{flex:none}
+.lg-logo{display:inline-flex;background:#fff;border-radius:14px;padding:8px}.lg-logo-img{max-height:56px;max-width:150px;object-fit:contain;display:block}
+.lg-word{font-size:34px;font-weight:700;line-height:1.1;letter-spacing:.5px}.lg-word-sub{font-size:14px;opacity:.8;margin-top:2px}
+.lg-slogan{font-size:38px;line-height:1.35;font-weight:700;margin:0 0 12px}
+.lg-tag{font-size:17px;line-height:1.8;opacity:.88;margin:0 0 14px;max-width:46ch}
+.lg-org{display:inline-block;background:#ffffff1f;border:1px solid #ffffff33;border-radius:999px;padding:4px 14px;font-size:14px;margin:0 0 12px}
+.lg-msg{background:#ffffff1a;border-radius:10px;padding:10px 14px;margin:0 0 14px}
+.lg-flow{display:block;width:100%;max-width:520px;height:auto;margin:18px 0 8px}
+.lg-flow-path{animation:lgflow 1.6s linear infinite}@keyframes lgflow{to{stroke-dashoffset:-26}}
+.lg-feats{list-style:none;margin:16px 0 0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:12px 20px}
+.lg-feats li{display:flex;gap:10px;align-items:flex-start;line-height:1.7;font-size:14.5px;opacity:.92}.lg-feats svg{flex:none;margin-top:3px;color:var(--lg-orange)}
+
+/* قسم الدخول العاجي */
+.lg-main{display:flex;align-items:center;justify-content:center;padding:32px 20px;background:var(--lg-ivory)}
+.lg-card{width:100%;max-width:430px;background:#fff;border:1px solid var(--line);border-radius:20px;box-shadow:0 18px 50px #0b254514,0 2px 6px #0b25450d;padding:34px 32px}
+.lg-form h2{margin:0 0 4px;font-size:26px;color:var(--lg-navy);font-weight:700}
+.lg-form .field{margin-bottom:16px}.lg-form .field label{display:block;margin-bottom:7px;font-size:15px;color:var(--ink);font-weight:500}
+.lg-form input{width:100%;min-height:50px;font-size:16px;border-radius:12px;border:1.5px solid var(--line);background:#fff;color:var(--ink);padding:0 14px;transition:border-color .15s,box-shadow .15s}
+.lg-form input:hover{border-color:#cfc6b0}
+.lg-form input:focus{outline:none;border-color:var(--lg-orange);box-shadow:0 0 0 4px #f28c2833}
+.lg-form input[aria-invalid=true]{border-color:var(--danger);box-shadow:0 0 0 4px #b4231826}
+.lg-pw{position:relative}.lg-pw input{padding-inline-end:52px}
+.lg-eye{position:absolute;inset-inline-end:4px;top:4px;width:44px;height:42px;border:0;background:transparent;color:var(--muted);cursor:pointer;border-radius:9px;display:flex;align-items:center;justify-content:center}
+.lg-eye:hover{color:var(--lg-navy);background:#f3efe4}.lg-eye:focus-visible{outline:2px solid var(--lg-orange)}
+.lg-err{display:flex;gap:8px;align-items:flex-start;background:#fef3f2;border:1px solid #fecdca;color:var(--danger);border-radius:10px;padding:10px 12px;font-size:14.5px;line-height:1.6;margin:0 0 14px}.lg-err[hidden]{display:none}.lg-err svg{flex:none;margin-top:2px}
+.lg-hint{color:var(--accent);font-size:14px;margin-top:6px}
+.lg-submit{width:100%;min-height:52px;font-size:17px;font-weight:700;border-radius:12px;border:0;background:var(--lg-orange);color:#fff;box-shadow:0 6px 16px #0b254522;cursor:pointer;transition:transform .1s,box-shadow .15s,filter .15s}
+.lg-submit:hover{filter:brightness(.96);box-shadow:0 8px 20px #f28c2855}.lg-submit:active{transform:translateY(1px)}
+.lg-submit:focus-visible{outline:3px solid var(--lg-navy);outline-offset:2px}.lg-submit:disabled{opacity:.65;cursor:progress;box-shadow:none}
+.lg-back{display:block;margin:12px auto 0;border:0;background:transparent;color:var(--lg-navy);font-size:15px;cursor:pointer;padding:6px 10px;border-radius:8px}.lg-back:hover{background:#f3efe4}.lg-back[hidden]{display:none}
+.lg-step[hidden]{display:none}.lg-mfa-ic{width:52px;height:52px;border-radius:14px;background:#fff3e4;color:var(--lg-orange-d);display:flex;align-items:center;justify-content:center;margin:2px 0 10px}
+.lg-mfa-t{font-size:22px;font-weight:700;color:var(--lg-navy);margin:0 0 4px}
+.lg-otp{font-size:22px!important;letter-spacing:.35em;text-align:center}
+.lg-help,.lg-note{text-align:center;margin:16px 0 0;color:var(--muted)}.lg-note{border-top:1px solid var(--line);padding-top:16px;margin-top:22px}
+
+/* أجهزة لوحية */
+@media (max-width:1100px){.lg-brand{padding:40px 34px}.lg-slogan{font-size:32px}.lg-feats{grid-template-columns:1fr}}
+/* جوال: تصير الكحلية ترويسة علوية مختصرة ثم البطاقة */
+@media (max-width:860px){
+  .lg-page{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .lg-brand{padding:22px 20px 26px}.lg-id{margin-bottom:16px}.lg-word{font-size:28px}
+  .lg-slogan{font-size:25px;margin-bottom:4px}.lg-tag,.lg-feats,.lg-flow{display:none}
+  .lg-main{align-items:flex-start;padding:0 16px 28px;margin-top:-14px}
+  .lg-card{padding:26px 20px;border-radius:18px}
+}
+@media (prefers-reduced-motion:reduce){.lg-flow-path{animation:none}.lg-submit{transition:none}}
