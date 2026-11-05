@@ -471,7 +471,7 @@ function newView(q) {
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
       row("رقم الجوال", h("input", { name: "deliverer_phone", maxlength: 30, type: "tel", dir: "ltr", placeholder: "رقم الجوال" })),
       row(dl("واردة عبر البريد الإلكتروني", "صادرة عبر البريد الإلكتروني"), h("input", { name: "deliverer_email", maxlength: 150, type: "email", dir: "ltr", placeholder: "البريد الإلكتروني" })),
-      row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date", required: true, value: today() }), true),
+      row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date" })),
       row("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
       row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" }))),
     err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));

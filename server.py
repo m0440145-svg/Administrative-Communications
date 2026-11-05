@@ -630,7 +630,7 @@ def create_corr(ctx):
     summary = f_text(b, "summary", 5000)
     party = f_text(b, "party", 200, True, "الجهة")
     party_ref = f_text(b, "party_ref", 100)
-    doc_date = f_date(b, "doc_date", True, "تاريخ المراسلة")
+    doc_date = f_date(b, "doc_date", False, "تاريخ المراسلة") or date.today().isoformat()  # اختياري: الافتراضي تاريخ التسجيل
     due = f_date(b, "due_date", label="تاريخ الاستحقاق")
     category = f_text(b, "category", 60)
     needs_reply = f_int(b, "needs_reply", 0, 1) or 0

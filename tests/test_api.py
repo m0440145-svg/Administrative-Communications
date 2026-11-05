@@ -327,6 +327,14 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(s, 400)
         self.assertEqual(self.corr(c1, assigned_to=self.uid["emp1"])[0], 201)
 
+    def test_09h_doc_date_optional(self):
+        s, d, _ = call("POST", "/api/correspondences", dict(scope="external", direction="incoming", subject="بلا تاريخ",
+                       party="جهة"), self.tok["clerk1"])
+        self.assertEqual(s, 201)
+        c = call("GET", f"/api/correspondences/{d['id']}", token=self.tok["clerk1"])[1]
+        self.assertEqual(c["doc_date"], c["created_at"][:10])  # الافتراضي تاريخ التسجيل
+        self.assertEqual(self.corr(self.tok["clerk1"], doc_date="2026-02-30")[0], 400)  # غير الصالح يُرفض
+
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
         self.assertGreater(d["total"], 0)
