@@ -133,6 +133,16 @@ CREATE TABLE IF NOT EXISTS webhooks(
   active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 """
 
+# فهارس تسرّع شرط الظهور (الذي يُطبَّق على كل استعلام) وقوائم الإحالات؛ تُنشأ بعد كل الجداول
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_c_created ON correspondences(created_by);
+CREATE INDEX IF NOT EXISTS ix_t_corr ON transfers(corr_id);
+CREATE INDEX IF NOT EXISTS ix_t_from ON transfers(from_user);
+CREATE INDEX IF NOT EXISTS ix_ru_user ON reply_users(user_id);
+CREATE INDEX IF NOT EXISTS ix_cu_dept ON corr_units(dept_id);
+CREATE INDEX IF NOT EXISTS ix_att_corr ON attachments(corr_id);
+"""
+
 DEFAULT_DEPARTMENTS = ["الإدارة العامة", "الشؤون الإدارية", "الشؤون المالية",
                        "الموارد البشرية", "تقنية المعلومات", "الشؤون القانونية"]
 
@@ -195,20 +205,84 @@ class ApiError(Exception):
         self.status, self.message = status, message
 
 
+# ───────────── نقاط الربط للوحدات الملحقة (ext_*.py) ─────────────
+EXT_SCHEMAS = []   # شيفرات SQL إضافية تُنفَّذ عند تهيئة القاعدة
+EXT_INIT = []      # fn(conn) بعد التهيئة والترحيل
+EXT_AUTH = []      # fn(handler, conn) -> user | None  (مصادقة بديلة مثل SSO)
+EXT_ENRICH = []    # fn(conn, user) تُثري بيانات المستخدم (مثل التفويض)
+EXT_TASKS = []     # fn(ctx) -> list[dict] مهام إضافية
+EXT_VISIBLE = []   # fn(user, alias) -> (sql, params) شروط ظهور إضافية
+EXT_DETAIL = []    # fn(ctx, c) تُثري تفاصيل المراسلة
+EXT_START = []     # fn() خلفيات تبدأ مع الخادم
+EXT_CLI = {}       # أوامر سطر الأوامر: python server.py <name> ...
+EXT_HANDLERS = {}  # أحداث: اسم -> [fn(ctx, **kw)]
+FILE_CODEC = {"enc": None, "dec": None}  # تشفير المرفقات عند الراحة (اختياري)
+MIGRATIONS = {
+    "correspondences": {"legal_hold": "INTEGER NOT NULL DEFAULT 0", "disposed_at": "TEXT", "legacy_ref": "TEXT"},
+    "attachments": {"removed_at": "TEXT", "enc": "INTEGER NOT NULL DEFAULT 0"},
+    "audit_log": {"prev_hash": "TEXT", "hash": "TEXT"},
+    "folders": {"parent_id": "INTEGER"},  # أرشيف متدرج: مجلد فرعي داخل مجلد
+}
+
+
+def on(event):
+    def deco(fn):
+        EXT_HANDLERS.setdefault(event, []).append(fn)
+        return fn
+    return deco
+
+
+def emit(event, ctx, **kw):
+    """يُطلق حدثًا للوحدات الملحقة؛ فشل أي وحدة لا يُفشل العملية الأساسية."""
+    for fn in EXT_HANDLERS.get(event, []):
+        try:
+            fn(ctx, **kw)
+        except Exception:
+            traceback.print_exc()
+
+
+def audit_hash(prev, at, uid, who, action, entity, eid, detail, ip):
+    raw = "|".join("" if x is None else str(x) for x in (prev, at, uid, who, action, entity, eid, detail, ip))
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def audit(ctx, action, entity=None, entity_id=None, detail=None):
+    """سجل إجراءات مترابط بسلسلة بصمات (أي تلاعب أو حذف في المنتصف يُكتشف عند التحقق)."""
     u = ctx.user or {}
     who = u.get("username")
     if u.get("via"):
         who = f"{who} ({u['via']})"
-    ctx.conn.execute(
-        "INSERT INTO audit_log(at,user_id,username,action,entity,entity_id,detail,ip) VALUES(?,?,?,?,?,?,?,?)",
-        (now(), u.get("id"), who, action, entity, entity_id, detail, ctx.ip))
+    conn = ctx.conn
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")  # قفل الكتابة يضمن تسلسل السلسلة بين الخيوط
+    try:
+        row = conn.execute("SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+        prev, at = (row[0] if row else ""), now()
+        h = audit_hash(prev, at, u.get("id"), who, action, entity, entity_id, detail, ctx.ip)
+        conn.execute(
+            "INSERT INTO audit_log(at,user_id,username,action,entity,entity_id,detail,ip,prev_hash,hash) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (at, u.get("id"), who, action, entity, entity_id, detail, ctx.ip, prev, h))
+        if own:
+            conn.execute("COMMIT")
+    except BaseException:
+        if own:
+            conn.execute("ROLLBACK")
+        raise
 
 
 def init_db():
     os.makedirs(UPLOADS, exist_ok=True)
     conn = connect()
     conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA_INDEXES)
+    for s in EXT_SCHEMAS:
+        conn.executescript(s)
+    for table, cols in MIGRATIONS.items():
+        have_t = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, ddl in cols.items():
+            if col not in have_t:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     have = {r[1] for r in conn.execute("PRAGMA table_info(correspondences)")}
     for col, ddl in NEW_COLUMNS.items():  # ترحيل القواعد القديمة
         if col not in have:
@@ -249,6 +323,8 @@ def init_db():
         else:
             print("   كلمة المرور  : (من المتغير ACP_ADMIN_PASSWORD)")
         print("=" * 60)
+    for fn in EXT_INIT:
+        fn(conn)
     conn.close()
 
 
@@ -257,22 +333,35 @@ def can(u, perm):
     return u["role"] == "admin" or perm in u.get("perms", ())
 
 
+def eff_ids(u):
+    """معرّفات المستخدم الفعلية: نفسه + من فوّضوه (التفويض يمنحه الاطلاع والتصرف نيابةً عنهم)."""
+    return list(u.get("eff") or [u["id"]])
+
+
 def visible_clause(u, alias="c"):
     """شرط SQL يحدد المراسلات التي يحق للمستخدم رؤيتها (الدور + درجة السرية + الارتباط)."""
     a = alias
     if u["role"] == "admin":
         return "1=1", []
     conf = f"{a}.conf_level<=?"
-    involved = (f"{a}.created_by=? OR {a}.assigned_to=? OR EXISTS(SELECT 1 FROM transfers t "
-                f"WHERE t.corr_id={a}.id AND (t.to_user=? OR t.from_user=?)) OR EXISTS(SELECT 1 FROM reply_users ru "
-                f"WHERE ru.corr_id={a}.id AND ru.user_id=?)")
+    eff = eff_ids(u)  # المستخدم + من فوّضه تفويضًا ساريًا
+    ph = ",".join("?" * len(eff))
+    # مجموعة المراسلات المرتبطة بالمستخدم تُحسب مرة واحدة عبر الفهارس (UNION) بدل فحص كل صف على حدة
+    involved = (f"{a}.id IN (SELECT id FROM correspondences WHERE created_by IN ({ph}) "
+                f"UNION SELECT id FROM correspondences WHERE assigned_to IN ({ph}) "
+                f"UNION SELECT corr_id FROM transfers WHERE to_user IN ({ph}) OR from_user IN ({ph}) "
+                f"UNION SELECT corr_id FROM reply_users WHERE user_id IN ({ph}))")
     p = [u["clearance"]]
-    ip = [u["id"]] * 5
+    ip = eff * 5
+    for fn in EXT_VISIBLE:  # شروط إضافية (مثل خطوات مسار العمل)
+        extra_sql, extra_p = fn(u, a)
+        involved += f" OR {extra_sql}"
+        ip += list(extra_p)
     if can(u, "see_all"):
         return f"({conf})", p
     if u["role"] == "manager" and u["department_id"]:
-        return (f"({conf} AND ({a}.department_id=? OR {a}.party_dept_id=? OR EXISTS(SELECT 1 FROM corr_units cu "
-                f"WHERE cu.corr_id={a}.id AND cu.dept_id=?) OR {involved}))",
+        return (f"({conf} AND ({a}.department_id=? OR {a}.party_dept_id=? OR {a}.id IN (SELECT corr_id FROM corr_units "
+                f"WHERE dept_id=?) OR {involved}))",
                 p + [u["department_id"]] * 3 + ip)
     return f"({conf} AND ({involved}))", p + ip
 
@@ -288,8 +377,10 @@ def get_visible(ctx, cid):
 def can_manage(ctx, corr):
     """مسؤول عن المراسلة: صلاحية شاملة، أو أحد المُسنَد إليهم (الأول أو أي مُحال إليه إحالة سارية)."""
     u = ctx.user
-    return (can(u, "manage_all") or corr["assigned_to"] == u["id"] or bool(ctx.conn.execute(
-        "SELECT 1 FROM transfers WHERE corr_id=? AND to_user=? AND status IN('pending','done')", (corr["id"], u["id"])).fetchone()))
+    eff = eff_ids(u)
+    return (can(u, "manage_all") or corr["assigned_to"] in eff or bool(ctx.conn.execute(
+        f"SELECT 1 FROM transfers WHERE corr_id=? AND to_user IN ({','.join('?' * len(eff))}) AND status IN('pending','done')",
+        [corr["id"]] + eff).fetchone()))
 
 
 def classes(conn, active_only=True):
@@ -516,7 +607,7 @@ def can_reply(ctx, c):
     if can(ctx.user, "manage_all"):
         return True
     ids = [r[0] for r in ctx.conn.execute("SELECT user_id FROM reply_users WHERE corr_id=?", (c["id"],))]
-    return ctx.user["id"] in ids if ids else True
+    return any(i in ids for i in eff_ids(ctx.user)) if ids else True
 
 
 def mark_replied(ctx, parent_id, ref):
@@ -524,6 +615,7 @@ def mark_replied(ctx, parent_id, ref):
     ctx.conn.execute("UPDATE correspondences SET status='in_progress', updated_at=? WHERE id=? AND status IN('new','referred')",
                      (now(), parent_id))
     audit(ctx, "reply_linked", "correspondence", parent_id, f"تم الرد بالمراسلة {ref}")
+    emit("replied", ctx, cid=parent_id, ref=ref)
 
 
 def like(s):
@@ -568,6 +660,9 @@ def build_filters(ctx):
                      "SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
     elif q.get("reply") == "replied":
         where.append("EXISTS(SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
+    if q.get("tag"):
+        where.append("EXISTS(SELECT 1 FROM corr_tags ctg JOIN tags tg ON tg.id=ctg.tag_id WHERE ctg.corr_id=c.id AND tg.name=?)")
+        p.append(q["tag"][:30])
     if q.get("has_att") == "1":
         where.append("EXISTS(SELECT 1 FROM attachments x WHERE x.corr_id=c.id)")
     since = {"today": "date('now','localtime')", "week": "date('now','localtime','-6 days')",
@@ -750,6 +845,7 @@ def create_corr(ctx):
         audit(ctx, "create", "correspondence", cid, ref)
     row = conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
     fire_webhooks("correspondence.created", hook_payload(row))
+    emit("corr_created", ctx, cid=cid, ref=ref, assignees=assignees, reply_users=reply_ids, parent=parent)
     return 201, {"id": cid, "ref_no": ref}
 
 
@@ -782,6 +878,8 @@ def get_corr(ctx):
         "SELECT DISTINCT u.full_name FROM transfers t JOIN users u ON u.id=t.to_user "
         "WHERE t.corr_id=? AND t.status='pending' ORDER BY t.id", (cid,))] or ([c["assignee_name"]] if c["assignee_name"] else [])
     c["can_reply"] = can_reply(ctx, c)
+    for fn in EXT_DETAIL:
+        fn(ctx, c)
     c["directives"] = [r[0] for r in conn.execute(
         "SELECT d.name FROM corr_directives cd JOIN directives d ON d.id=cd.directive_id WHERE cd.corr_id=? ORDER BY d.sort, d.id", (cid,))]
     c["units"] = [r[0] for r in conn.execute(
@@ -858,6 +956,7 @@ def update_corr(ctx):
     if "status" in b:
         fire_webhooks("correspondence.status", hook_payload(conn.execute(
             "SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()))
+        emit("status_changed", ctx, cid=cid, old=c["status"], new=b["status"])
     return 200, {"ok": True}
 
 
@@ -885,13 +984,14 @@ def add_transfer(ctx):
         audit(ctx, "transfer", "correspondence", cid, f"إحالة إلى {target['full_name']}" + (f" — {instr}" if instr else ""))
     fire_webhooks("correspondence.referred", hook_payload(conn.execute(
         "SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()))
+    emit("transferred", ctx, cid=cid, to=to, instruction=instr)
     return 201, {"ok": True}
 
 
 @route("POST", r"/api/transfers/(?P<id>\d+)/complete")
 def complete_transfer(ctx):
     t = ctx.conn.execute("SELECT * FROM transfers WHERE id=?", (int(ctx.params["id"]),)).fetchone()
-    if not t or t["to_user"] != ctx.user["id"] or t["status"] != "pending":
+    if not t or t["to_user"] not in eff_ids(ctx.user) or t["status"] != "pending":
         raise ApiError(404, "الإحالة غير موجودة أو ليست موجّهة إليك")
     note = f_text(ctx.body, "note", 1000)
     with tx(ctx.conn):
@@ -899,22 +999,26 @@ def complete_transfer(ctx):
         ctx.conn.execute("UPDATE correspondences SET status='in_progress', updated_at=? "
                          "WHERE id=? AND status='referred'", (now(), t["corr_id"]))
         audit(ctx, "transfer_done", "correspondence", t["corr_id"], note or "تم الاطلاع/التنفيذ")
+    emit("transfer_done", ctx, cid=t["corr_id"], by=ctx.user["id"], from_user=t["from_user"])
     return 200, {"ok": True}
 
 
 @route("GET", r"/api/tasks")
 def my_tasks(ctx):
+    eff = eff_ids(ctx.user)
+    ph = ",".join("?" * len(eff))
     replies = [dict(r, kind="reply") for r in ctx.conn.execute(
         "SELECT NULL AS transfer_id, 'مطلوب منك الرد على هذه المراسلة' AS instruction, c.due_date AS transfer_due, "
         "c.created_at AS transferred_at, c.id, c.ref_no, c.subject, c.priority, c.conf_level, c.status, "
         "cr.full_name AS from_name FROM reply_users ru JOIN correspondences c ON c.id=ru.corr_id "
-        "JOIN users cr ON cr.id=c.created_by WHERE ru.user_id=? AND ru.status='pending' ORDER BY c.id DESC", (ctx.user["id"],))]
+        f"JOIN users cr ON cr.id=c.created_by WHERE ru.user_id IN ({ph}) AND ru.status='pending' ORDER BY c.id DESC", eff)]
     rows = ctx.conn.execute(
         "SELECT t.id AS transfer_id, t.instruction, t.due_date AS transfer_due, t.created_at AS transferred_at, "
         "c.id, c.ref_no, c.subject, c.priority, c.conf_level, c.status, f.full_name AS from_name "
         "FROM transfers t JOIN correspondences c ON c.id=t.corr_id JOIN users f ON f.id=t.from_user "
-        "WHERE t.to_user=? AND t.status='pending' ORDER BY t.id DESC", (ctx.user["id"],)).fetchall()
-    return 200, [dict(r, kind="transfer") for r in rows] + replies
+        f"WHERE t.to_user IN ({ph}) AND t.status='pending' ORDER BY t.id DESC", eff).fetchall()
+    extra = [t for fn in EXT_TASKS for t in fn(ctx)]
+    return 200, [dict(r, kind="transfer") for r in rows] + replies + extra
 
 
 # ───────────────────────── المرفقات ─────────────────────────
@@ -942,18 +1046,20 @@ def upload(ctx):
         raise ApiError(413, "حجم الملف يتجاوز 20 ميغابايت")
     data = ctx.h.rfile.read(n)
     stored = secrets.token_hex(16)
+    digest = hashlib.sha256(data).hexdigest()  # البصمة دائمًا للنص الأصلي (قبل أي تشفير)
+    enc = 1 if FILE_CODEC["enc"] else 0
     with open(os.path.join(UPLOADS, stored), "wb") as f:
-        f.write(data)
-    digest = hashlib.sha256(data).hexdigest()
+        f.write(FILE_CODEC["enc"](data) if enc else data)
     try:
         with tx(ctx.conn):
             cur = ctx.conn.execute(
-                "INSERT INTO attachments(corr_id,filename,stored_name,size,sha256,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?)",
-                (cid, name, stored, n, digest, ctx.user["id"], now()))
+                "INSERT INTO attachments(corr_id,filename,stored_name,size,sha256,uploaded_by,created_at,enc) VALUES(?,?,?,?,?,?,?,?)",
+                (cid, name, stored, n, digest, ctx.user["id"], now(), enc))
             audit(ctx, "attach", "correspondence", cid, f"{name} (sha256:{digest[:12]}…)")
     except BaseException:
         os.remove(os.path.join(UPLOADS, stored))
         raise
+    emit("attachment_added", ctx, cid=cid, att_id=cur.lastrowid, filename=name, data=data)
     return 201, {"id": cur.lastrowid, "sha256": digest}
 
 
@@ -963,11 +1069,20 @@ def download(ctx):
     if not a:
         raise ApiError(404, "المرفق غير موجود")
     get_visible(ctx, a["corr_id"])
+    if a["removed_at"]:
+        raise ApiError(410, "أُتلف هذا المرفق وفق سياسة الاحتجاز (بقي سجله فقط)")
     path = os.path.join(UPLOADS, a["stored_name"])
     if not os.path.isfile(path):
         raise ApiError(404, "الملف مفقود من التخزين")
     with open(path, "rb") as f:
         data = f.read()
+    if a["enc"]:
+        if not FILE_CODEC["dec"]:
+            raise ApiError(500, "المرفق مشفّر ومفتاح التشفير غير مضبوط")
+        try:
+            data = FILE_CODEC["dec"](data)
+        except Exception:
+            raise ApiError(500, "تعذّر فك تشفير المرفق (مفتاح غير صحيح أو ملف تالف)")
     if hashlib.sha256(data).hexdigest() != a["sha256"]:
         audit(ctx, "integrity_failure", "attachment", a["id"], a["filename"])
         raise ApiError(500, "فشل التحقق من سلامة الملف (البصمة لا تطابق)")
@@ -1000,9 +1115,7 @@ def dashboard(ctx):
         "total": one(), "by_status": by_status, "by_type": by_type, "monthly": monthly, "recent": recent,
         "overdue": one("AND c.due_date IS NOT NULL AND c.due_date<date('now','localtime') AND c.status NOT IN('closed','archived')"),
         "urgent_open": one(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')"),
-        "my_tasks": conn.execute("SELECT (SELECT COUNT(*) FROM transfers WHERE to_user=? AND status='pending') + "
-                                 "(SELECT COUNT(*) FROM reply_users WHERE user_id=? AND status='pending')",
-                                 (ctx.user["id"], ctx.user["id"])).fetchone()[0],
+        "my_tasks": len(my_tasks(ctx)[1]),
     }
 
 
@@ -1187,13 +1300,29 @@ def reports(ctx):
 # ───────────── المجلدات وأنواع المعاملات ─────────────
 @route("GET", r"/api/lookups/(?P<kind>folders|types|directives)")
 def lookups_list(ctx):
-    t = LOOKUPS[ctx.params["kind"]]
+    kind = ctx.params["kind"]
+    t = LOOKUPS[kind]
     allr = ctx.user["role"] == "admin" and ctx.query.get("all") == "1"
-    rows = ctx.conn.execute(f"SELECT id,name,sort,active FROM {t}" + ("" if allr else " WHERE active=1") + " ORDER BY sort,id")
-    return 200, [dict(r) for r in rows]
+    cols = "id,name,sort,active" + (",parent_id" if kind == "folders" else "")
+    rows = [dict(r) for r in ctx.conn.execute(f"SELECT {cols} FROM {t}" + ("" if allr else " WHERE active=1") + " ORDER BY sort,id")]
+    if kind == "folders":  # أرشيف متدرج: ترتيب شجري مع المسار الكامل (أب ‹ ابن)
+        by_id = {r["id"]: r for r in rows}
+        kids = {}
+        for r in rows:
+            kids.setdefault(r["parent_id"] if r["parent_id"] in by_id else None, []).append(r)
+        out = []
+
+        def walk(pid, depth, trail):
+            for r in kids.get(pid, []):
+                r["depth"], r["path"] = depth, " ‹ ".join(trail + [r["name"]])
+                out.append(r)
+                walk(r["id"], depth + 1, trail + [r["name"]])
+        walk(None, 0, [])
+        rows = out
+    return 200, rows
 
 
-def lookup_fields(b, creating):
+def lookup_fields(b, creating, kind="types", conn=None, self_id=None):
     out = {}
     if creating or "name" in b:
         out["name"] = f_text(b, "name", 80, True, "الاسم")
@@ -1201,15 +1330,32 @@ def lookup_fields(b, creating):
         out["sort"] = f_int(b, "sort", 0, 1000, True)
     if "active" in b:
         out["active"] = 1 if b["active"] else 0
+    if kind == "folders" and "parent_id" in b:
+        pid = f_int(b, "parent_id")
+        if pid is not None:
+            depth, cur = 1, pid
+            while cur is not None:  # منع الحلقات وتحديد العمق الأقصى (4 مستويات)
+                row = conn.execute("SELECT id, parent_id FROM folders WHERE id=?", (cur,)).fetchone()
+                if not row:
+                    raise ApiError(400, "المجلد الأب غير موجود")
+                if self_id is not None and row["id"] == self_id:
+                    raise ApiError(400, "لا يمكن جعل المجلد داخل نفسه أو داخل أحد فروعه")
+                cur, depth = row["parent_id"], depth + 1
+                if depth > 4:
+                    raise ApiError(400, "العمق الأقصى للأرشيف 4 مستويات")
+        out["parent_id"] = pid
     return out
 
 
 @route("POST", r"/api/lookups/(?P<kind>folders|types|directives)", roles=("admin",))
 def lookups_add(ctx):
-    t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, True)
+    kind = ctx.params["kind"]
+    t, f = LOOKUPS[kind], lookup_fields(ctx.body, True, kind, ctx.conn)
     mx = ctx.conn.execute(f"SELECT COALESCE(MAX(sort),0) FROM {t}").fetchone()[0]
+    cols = ["name", "sort"] + (["parent_id"] if kind == "folders" else [])
+    vals = [f["name"], f.get("sort", mx + 1)] + ([f.get("parent_id")] if kind == "folders" else [])
     try:
-        cur = ctx.conn.execute(f"INSERT INTO {t}(name,sort) VALUES(?,?)", (f["name"], f.get("sort", mx + 1)))
+        cur = ctx.conn.execute(f"INSERT INTO {t}({','.join(cols)}) VALUES({','.join('?' * len(cols))})", vals)
     except sqlite3.IntegrityError:
         raise ApiError(409, "الاسم موجود مسبقًا")
     audit(ctx, "lookup_create", t, cur.lastrowid, f["name"])
@@ -1218,7 +1364,8 @@ def lookups_add(ctx):
 
 @route("PUT", r"/api/lookups/(?P<kind>folders|types|directives)/(?P<id>\d+)", roles=("admin",))
 def lookups_edit(ctx):
-    t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, False)
+    kind = ctx.params["kind"]
+    t, f = LOOKUPS[kind], lookup_fields(ctx.body, False, kind, ctx.conn, int(ctx.params["id"]))
     if not f:
         raise ApiError(400, "لا يوجد ما يُحدَّث")
     try:
@@ -1229,7 +1376,6 @@ def lookups_edit(ctx):
         raise ApiError(404, "غير موجود")
     audit(ctx, "lookup_update", t, int(ctx.params["id"]), json.dumps(f, ensure_ascii=False))
     return 200, {"ok": True}
-
 
 @route("GET", r"/api/users")
 def list_users(ctx):
@@ -1392,7 +1538,8 @@ SEC_HEADERS = {
     "Cache-Control": "no-store",
 }
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-        ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+        ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+        ".json": "application/manifest+json; charset=utf-8"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1416,6 +1563,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send(status, json.dumps(obj, ensure_ascii=False).encode(), {"Content-Type": "application/json; charset=utf-8"})
 
     def authenticate(self, conn):
+        u = self._authenticate(conn)
+        if u:
+            u["perms"] = load_perms(conn, u["role"])
+            u["eff"] = [u["id"]]
+            for fn in EXT_ENRICH:
+                fn(conn, u)
+        return u
+
+    def _authenticate(self, conn):
         key = self.headers.get("X-API-Key")
         if key:
             r = conn.execute("SELECT u.*, k.name AS key_name FROM api_keys k JOIN users u ON u.id=k.user_id "
@@ -1423,18 +1579,17 @@ class Handler(BaseHTTPRequestHandler):
             if r:
                 u = dict(r)
                 u["via"] = "API:" + u.pop("key_name")
-                u["perms"] = load_perms(conn, u["role"])
                 return u
             return None
         a = self.headers.get("Authorization") or ""
         if a.startswith("Bearer "):
             r = conn.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
                              "WHERE s.token_hash=? AND s.expires_at>? AND u.active=1", (sha(a[7:]), now())).fetchone()
-            if not r:
-                return None
-            u = dict(r)
-            u["perms"] = load_perms(conn, u["role"])
-            return u
+            return dict(r) if r else None
+        for fn in EXT_AUTH:  # مصادقة بديلة (SSO عبر وسيط موثوق)
+            u = fn(self, conn)
+            if u:
+                return u
         return None
 
     def serve_static(self, path):
@@ -1485,18 +1640,43 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = handle_any
 
 
+def load_extensions():
+    """تحميل الوحدات الملحقة (كل وحدة تضيف جداولها ومساراتها دون المساس بالنواة)."""
+    import importlib
+    me = sys.modules[__name__]
+    for name in ("ext_core", "ext_workflow", "ext_gov"):
+        importlib.import_module(name).install(me)
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] in EXT_CLI:  # أوامر الصيانة: backup / restore / verify-audit …
+        if sys.argv[1] not in ("restore", "genkey"):  # الاسترجاع يجب ألا يُنشئ قاعدة جديدة قبل أن يضع القديمة
+            init_db()
+        return EXT_CLI[sys.argv[1]](sys.argv[2:])
     init_db()
     host = os.environ.get("ACP_HOST", "127.0.0.1")
     port = int(os.environ.get("ACP_PORT") or os.environ.get("PORT") or 8080)
     srv = ThreadingHTTPServer((host, port), Handler)
-    print(f"منصة الاتصالات الإدارية تعمل على http://{host}:{port}")
+    scheme = "http"
+    cert, key = os.environ.get("ACP_TLS_CERT"), os.environ.get("ACP_TLS_KEY")
+    if cert and key:  # تشفير الاتصال (HTTPS) مباشرة؛ الأفضل وكيل عكسي في الإنتاج
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(cert, key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+    for fn in EXT_START:
+        fn()
+    print(f"منصة الاتصالات الإدارية تعمل على {scheme}://{host}:{port}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
 
+
+load_extensions()
 
 if __name__ == "__main__":
     main()

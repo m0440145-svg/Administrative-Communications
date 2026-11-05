@@ -134,22 +134,27 @@ function lookupView(kind, title, note, placeholder) {
       const name = h("input", { value: r.name, maxlength: 80, "aria-label": "الاسم" });
       const sort = h("input", { type: "number", value: r.sort, min: 0, max: 1000, class: "narrow", "aria-label": "الترتيب" });
       const act = h("input", { type: "checkbox", checked: !!r.active, "aria-label": "نشط" });
-      return h("tr", {}, h("td", {}, name), h("td", {}, sort), h("td", {}, act), h("td", {}, h("button", { class: "btn sm", onclick: guard(async () => {
-        await api(`/lookups/${kind}/${r.id}`, { method: "PUT", body: { name: name.value, sort: Number(sort.value), active: act.checked } });
-        toast("تم الحفظ"); await loadRefs(); render();
-      }) }, "حفظ")));
+      const parent = isTree ? sel("parent", parentOpts(r.id), r.parent_id || "", { "aria-label": "المجلد الأب" }) : null;
+      return h("tr", {}, h("td", {}, isTree ? h("span", { class: "muted" }, "  ".repeat(r.depth || 0) + (r.depth ? "↳ " : "")) : null, name), isTree ? h("td", {}, parent) : null, h("td", {}, sort), h("td", {}, act),
+        h("td", {}, h("button", { class: "btn sm", onclick: guard(async () => {
+          await api(`/lookups/${kind}/${r.id}`, { method: "PUT", body: { name: name.value, sort: Number(sort.value), active: act.checked, ...(isTree ? { parent_id: parent.value ? Number(parent.value) : null } : {}) } });
+          toast("تم الحفظ"); await loadRefs(); render();
+        }) }, "حفظ")));
     };
+    const isTree = kind === "folders";  // أرشيف متدرج: مجلد فرعي داخل مجلد (حتى 4 مستويات)
+    const parentOpts = (selfId) => ({ "": "— مجلد رئيسي —", ...Object.fromEntries(rows.filter((x) => x.id !== selfId).map((x) => [x.id, x.path || x.name])) });
+    const newParent = isTree ? sel("newparent", parentOpts(null), "", { "aria-label": "المجلد الأب" }) : null;
     return [adminHead(kind, title, note),
-      h("div", { class: "card row" }, nm, h("button", { class: "btn", onclick: guard(async () => {
-        await api(`/lookups/${kind}`, { method: "POST", body: { name: nm.value } }); toast("تمت الإضافة"); await loadRefs(); render();
+      h("div", { class: "card row" }, nm, newParent, h("button", { class: "btn", onclick: guard(async () => {
+        await api(`/lookups/${kind}`, { method: "POST", body: { name: nm.value, ...(isTree ? { parent_id: newParent.value ? Number(newParent.value) : null } : {}) } }); toast("تمت الإضافة"); await loadRefs(); render();
       }) }, "إضافة")),
-      h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الاسم", "الترتيب", "نشط", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rows.map(trow))))];
+      h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الاسم", isTree ? "المجلد الأب" : null, "الترتيب", "نشط", ""].filter((t) => t !== null).map((t) => h("th", {}, t)))), h("tbody", {}, rows.map(trow))))];
   };
 }
 
 const ADMIN_VIEWS = {
   units: unitsView, staff: staffView, classes: classesView, perms: permsView,
-  folders: lookupView("folders", "المجلدات", "المجلد هو مكان حفظ المراسلة في الأرشيف (مثل: التعاميم، العقود). يُختار عند التسجيل ويمكن تغييره لاحقًا ويُفلتر به.", "اسم المجلد الجديد"),
+  folders: lookupView("folders", "المجلدات", "المجلد هو مكان حفظ المراسلة في الأرشيف (مثل: التعاميم، العقود). الأرشيف متدرج: اختر «المجلد الأب» لإنشاء مجلد فرعي (حتى 4 مستويات؛ أسماء المجلدات فريدة، فاكتب مثلًا «التعاميم 2026»). يُختار عند التسجيل ويمكن تغييره لاحقًا ويُفلتر به.", "اسم المجلد الجديد"),
   directives: lookupView("directives", "توجيهات الإسناد", "خيارات قسيمة الإحالة (للاطلاع، للدراسة والإفادة، للرد…) التي تظهر تحت «إسناد إلى» ويُختار منها أكثر من توجيه، وتصل نصًا للموظف المُسنَد إليه. خيار «أخرى» نصي ثابت في النموذج.", "اسم التوجيه الجديد"),
   types: lookupView("types", "أنواع المعاملات", "نوع المعاملة يصف موضوع الخطاب (طلب، شكوى، تعميم…) ويظهر في القوائم والتقارير. تعطيل نوع لا يؤثر على المراسلات القديمة.", "اسم نوع المعاملة الجديد"),
 };
@@ -159,7 +164,7 @@ async function reportsView(q) {
   const keys = ["from", "to", "scope", "direction", "dept", "priority", "status"];
   const params = new URLSearchParams();
   keys.forEach((k) => q.get(k) && params.set(k, q.get(k)));
-  const d = await api("/reports?" + params);
+  const [d, kpi] = await Promise.all([api("/reports?" + params), kpiBlock(q)]);
   const apply = () => {
     const p = new URLSearchParams();
     for (const k of keys) { const el = form.elements[k]; if (el && el.value) p.set(k, el.value); }
@@ -172,6 +177,7 @@ async function reportsView(q) {
     dd("direction", "الاتجاه", { "": "وارد وصادر", ...L.direction }), dd("scope", "نوع البريد", { "": "داخلي وخارجي", ...L.scope }),
     dd("dept", "الوحدة", { "": "كل الوحدات", ...Object.fromEntries(state.depts.map((x) => [x.id, x.name])) }),
     dd("priority", "التصنيف", { "": "كل التصنيفات", ...L.priority }), dd("status", "الحالة", { "": "كل الحالات", ...L.status }),
+    h("button", { type: "button", class: "btn ghost sm", onclick: () => saveCurrentFilter("report") }, "💾 حفظ"),
     h("button", { type: "button", class: "btn ghost sm", onclick: () => window.print() }, "طباعة"),
     can("export") ? h("button", { type: "button", class: "btn ghost sm", onclick: () => exportCsv(params) }, "تصدير CSV") : null));
 
@@ -196,5 +202,6 @@ async function reportsView(q) {
       sec("الحركة الشهرية (وارد / صادر)", bars(d.by_month, (r) => `${r.k}  (وارد ${r.incoming} · صادر ${r.outgoing})`, (r) => r.incoming + r.outgoing)),
       sec("حسب نوع المعاملة", bars(d.by_ctype, (r) => r.k, (r) => r.n)),
       sec("حسب المجلد", bars(d.by_folder, (r) => r.k, (r) => r.n)),
-      sec("أكثر الجهات مراسلةً", bars(d.top_parties, (r) => r.k, (r) => r.n)))];
+      sec("أكثر الجهات مراسلةً", bars(d.top_parties, (r) => r.k, (r) => r.n))),
+    ...kpi];
 }

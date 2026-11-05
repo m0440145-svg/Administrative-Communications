@@ -16,7 +16,7 @@ const L = {
     apikey_revoke: "إلغاء مفتاح API", webhook_create: "إنشاء Webhook", webhook_delete: "حذف Webhook", integrity_failure: "فشل سلامة ملف" },
 };
 
-const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {}, folders: [], types: [], directives: [] };
+const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {}, folders: [], types: [], directives: [], filters: [], prefs: { theme: "auto", page_size: 20 }, unread: 0 };
 
 // ───────── أدوات ─────────
 function h(tag, attrs, ...kids) {
@@ -71,6 +71,7 @@ const typeLabel = (c) => `${L.direction[c.direction]} ${L.scope[c.scope]}`;
 const deptName = (id) => (state.depts.find((d) => d.id === id) || {}).name || "—";
 const isStaff = () => ["admin", "manager", "clerk"].includes(state.user.role);
 const can = (p) => state.user.role === "admin" || (state.user.perms || []).includes(p);
+const folderOptions = () => Object.fromEntries(state.folders.map((f) => [f.id, "\u00a0\u00a0".repeat(f.depth || 0) + (f.depth ? "↳ " : "") + f.name])); // شجرة المجلدات
 const activeDepts = () => state.depts.filter((d) => d.active);
 const deptOptions = () => Object.fromEntries(activeDepts().map((d) => [d.id, d.name]));
 // حالة الرد: للوارد الذي يحتاج رد → «بانتظار الرد» أو «تم الرد»؛ وللصادر المرتبط بوارد → «رد على…»
@@ -102,21 +103,40 @@ const NAV = [
   ["#/list?direction=incoming", "الوارد"],
   ["#/list?direction=outgoing", "الصادر"],
   ["#/list", "المعاملات"],
+  ["#/search", "بحث متقدم"],
+  ["#/notifications", "الإشعارات"],
+  ["#/delegation", "التفويض"],
 ];
 const REPORT_NAV = [["#/reports", "التقارير والمؤشرات"]];
 const ADMIN_NAV = [["sep", "إعدادات النظام"], ["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/classes", "التصنيفات والخصوصية"],
+  ["#/admin/workflows", "مسارات العمل"], ["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"],
   ["#/admin/perms", "الصلاحيات"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]];
+
+const THEMES = { auto: "تلقائي", light: "فاتح", dark: "داكن" };
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  try { localStorage.setItem("acp_theme", t || "auto"); } catch { /* التخزين غير متاح */ }
+}
+(() => { try { applyTheme(localStorage.getItem("acp_theme") || "auto"); } catch { /* */ } })();
 
 function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
   const items = [...NAV, ...(isStaff() || can("export") ? REPORT_NAV : []), ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
     href === "sep" ? h("div", { class: "sep" }, label)
       : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?")) ? "active" : "" },
-        label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null));
+        label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null,
+        href === "#/notifications" ? h("span", { class: "badge-n", id: "notif-badge", hidden: !state.unread }, state.unread || "") : null));
+  const saved = state.filters.length ? [h("div", { class: "sep" }, "فلاتري المحفوظة"), ...state.filters.map((fl) => h("div", { class: "savedf" },
+    h("a", { href: (fl.kind === "report" ? "#/reports?" : "#/list?") + fl.query }, fl.name),
+    h("button", { class: "x", title: "حذف الفلتر", "aria-label": "حذف الفلتر " + fl.name, onclick: async () => { try { await api("/me/filters/" + fl.id, { method: "DELETE" }); await loadRefs(); render(); } catch (e) { toast(e.message, true); } } }, "×")))] : [];
+  const themeSel = sel("theme", THEMES, (state.prefs || {}).theme || "auto", { "aria-label": "السمة", class: "themesel", onchange: async (e) => {
+    applyTheme(e.target.value);
+    try { await api("/me/prefs", { method: "PUT", body: { theme: e.target.value, page_size: (state.prefs || {}).page_size || 20 } }); state.prefs.theme = e.target.value; } catch { /* */ } } });
   return h("div", { class: "shell" },
     h("nav", { class: "side", "aria-label": "القائمة الرئيسية" },
-      h("h1", {}, "منصة الاتصالات الإدارية"), items,
+      h("h1", {}, "منصة الاتصالات الإدارية"), items, saved,
       h("div", { class: "who" }, h("div", {}, state.user.full_name), h("div", { class: "small" }, L.role[state.user.role]),
+        h("label", { class: "small themelb" }, "السمة ", themeSel),
         h("button", { class: "btn ghost sm", onclick: doLogout }, "تسجيل الخروج"))),
     h("main", {}, content));
 }
@@ -243,10 +263,11 @@ async function listView(q) {
       h("summary", {}, "مزيد من الفلاتر"),
       h("div", { class: "frow" },
         dd("type", "نوع المعاملة", { "": "كل أنواع المعاملات", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }),
-        dd("folder", "المجلد", { "": "كل المجلدات", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }),
+        dd("folder", "المجلد", { "": "كل المجلدات", ...folderOptions() }),
         dd("scope", "نوع البريد", { "": "داخلي وخارجي", ...L.scope }), dd("dept", "الإدارة", depts),
         h("input", { type: "date", name: "from", "aria-label": "من تاريخ", value: q.get("from") || "", onchange: apply }),
         h("input", { type: "date", name: "to", "aria-label": "إلى تاريخ", value: q.get("to") || "", onchange: apply }),
+        h("button", { type: "button", class: "btn ghost sm", onclick: () => saveCurrentFilter("list") }, "💾 حفظ الفلتر"),
         can("export") ? h("button", { type: "button", class: "btn ghost sm", onclick: () => exportCsv(params) }, "تصدير CSV") : null)));
 
   const k = data.kpi;
@@ -340,7 +361,8 @@ async function tasksView() {
             t.priority !== "normal" ? prioPill(t.priority) : null, t.conf_level ? pill("conf" + t.conf_level, L.conf[t.conf_level]) : null),
           h("p", { class: "muted small" }, `من: ${t.from_name} — ${fmtDT(t.transferred_at)}`, t.transfer_due ? ` — الاستحقاق: ${t.transfer_due}` : ""),
           t.instruction ? h("p", {}, "التوجيه: ", t.instruction) : null,
-          t.kind === "reply" ? h("div", { class: "row" }, h("a", { class: "btn", href: `#/new?parent=${t.id}&direction=outgoing&subject=${encodeURIComponent("رد: " + t.subject)}` }, "تسجيل الرد"),
+          t.kind === "step" ? h("div", { class: "row" }, h("a", { class: "btn", href: "#/c/" + t.id }, "فتح المراسلة وتنفيذ الخطوة"), t.transfer_due ? h("span", { class: "small muted" }, "الاستحقاق: " + t.transfer_due) : null)
+          : t.kind === "reply" ? h("div", { class: "row" }, h("a", { class: "btn", href: `#/new?parent=${t.id}&direction=outgoing&subject=${encodeURIComponent("رد: " + t.subject)}` }, "تسجيل الرد"),
             h("a", { class: "btn ghost", href: "#/c/" + t.id }, "فتح المراسلة"))
           : h("div", { class: "row" }, note, h("button", { class: "btn", onclick: async () => {
             try { await api(`/transfers/${t.transfer_id}/complete`, { method: "POST", body: { note: note.value } }); toast("تم تسجيل التنفيذ"); render(); }
@@ -389,11 +411,13 @@ function peoplePicker(candidates, hint, placeholder = "ابحث عن موظف…
   const node = h("div", { class: "replyers" },
     h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: add }, "إضافة")),
     chips, hint ? h("div", { class: "small muted" }, hint) : null);
-  return { node, ids: () => [...sel$.keys()] };
+  return { node, ids: () => [...sel$.keys()], add: (u) => { sel$.set(u.id, u); renderChips(); } };
 }
 
-function newView(q) {
+async function newView(q) {
   const parent = q.get("parent");
+  const [templates, workflows, parentC] = await Promise.all([api("/templates"), api("/workflows"), parent ? api("/correspondences/" + parent).catch(() => null) : null]);
+  const tagsBox = tagsInput();
   const err = h("div", { class: "err", role: "alert" });
   const canExternal = can("create_external");
   let dir = q.get("direction") === "outgoing" ? "outgoing" : "incoming";
@@ -435,6 +459,24 @@ function newView(q) {
   const replyRow = row(h("span", {}, "المخوّلون بالرد"), replyBox);
   replyRow.hidden = true; // يظهر عند اختيار «تحتاج إلى رد: نعم»
 
+  // اقتراحات ذكية (تعلّم من الأرشيف + قواعد التوجيه) تظهر أثناء الكتابة
+  const val = (n) => (form.elements[n] ? form.elements[n].value : "");
+  const sug = suggestPanel(() => ({ subject: val("subject"), summary: val("summary"), party: val("party"), direction: dir }), {
+    type: (id) => (form.elements.type_id.value = id), folder: (id) => (form.elements.folder_id.value = id),
+    priority: (key) => { const r = form.querySelector(`input[name=priority][value="${key}"]`); if (r) r.checked = true; },
+    unit: (u) => unitPicker.add({ id: u.id, full_name: u.name }), assignee: (u) => assignPicker.add({ id: u.id, full_name: u.name }),
+  });
+  // قوالب الخطابات: تملأ الموضوع والرسالة بمتغيرات الأصل والجهة
+  const tplPick = templates.length ? sel("tpl", { "": "— بدون قالب —", ...Object.fromEntries(templates.map((t) => [t.id, t.name])) }, "", { "aria-label": "قالب الخطاب", onchange: (e) => {
+    const t = templates.find((x) => x.id === Number(e.target.value)); if (!t) return;
+    const vars = { party: val("party") || (parentC && parentC.party) || "", date: today(), ref_orig: (parentC && parentC.ref_no) || "", subject_orig: (parentC && parentC.subject) || val("subject") };
+    if (t.subject_tpl) form.elements.subject.value = fillTemplate(t.subject_tpl, vars);
+    if (t.body_tpl) form.elements.summary.value = fillTemplate(t.body_tpl, vars);
+    if (t.type_id) form.elements.type_id.value = t.type_id;
+    sug.trigger();
+  } }) : null;
+  const wfPick = workflows.length ? sel("wf", { "": "— بدون مسار عمل —", ...Object.fromEntries(workflows.map((w) => [w.id, w.name])) }, "", { "aria-label": "مسار العمل" }) : null;
+
   const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
@@ -449,10 +491,16 @@ function newView(q) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
     }
     if (parent) body.parent_id = Number(parent);
+    const tags = tagsBox.values();
+    if (tags.length) body.tags = tags;
     try {
       const r = await api("/correspondences", { method: "POST", body });
       const file = form.file.files[0];
       if (file) await upload(r.id, file);
+      if (wfPick && wfPick.value) {
+        try { await api(`/correspondences/${r.id}/workflow`, { method: "POST", body: { workflow_id: Number(wfPick.value) } }); }
+        catch (we) { toast("سُجّلت المراسلة لكن تعذّر بدء المسار: " + we.message, true); }
+      }
       toast("تم التسجيل برقم " + r.ref_no); location.hash = "#/c/" + r.id;
     } catch (ex) { err.textContent = ex.message; }
   } },
@@ -462,20 +510,24 @@ function newView(q) {
     row(h("span", {}, "نوع البريد"), h("div", { class: "classes" },
       canExternal ? radio("scope", "external", "خارجي", (q.get("scope") || "external") === "external") : null,
       radio("scope", "internal", "داخلي", !canExternal || q.get("scope") === "internal"))),
-    row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "" }), true),
-    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة", value: q.get("party") || "" }), true),
-    row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة" })),
+    tplPick ? row("قالب الخطاب", tplPick) : null,
+    row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "", oninput: sug.trigger }), true),
+    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة", value: q.get("party") || "", oninput: sug.trigger }), true),
+    row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة", oninput: sug.trigger })),
+    row(h("span", {}, "اقتراحات ذكية"), sug.node),
     row("الرقم المتسلسل للمراسلة", h("input", { name: "party_ref", maxlength: 100, placeholder: "حروف وأرقام" })),
     row("المرفق", h("input", { type: "file", name: "file" })),
     row(h("span", {}, "تصنيف الوثيقة"), classes),
     row("نوع المعاملة", sel("type_id", { "": "— اختر —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, "")),
-    row("المجلد", sel("folder_id", { "": "— بدون مجلد —", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }, "")),
+    row("المجلد", sel("folder_id", { "": "— بدون مجلد —", ...folderOptions() }, "")),
+    row("الوسوم", tagsBox.node),
     row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" },
       radio("needs_reply", "1", "نعم", false, () => (replyRow.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyRow.hidden = true)))),
     replyRow,
     row("الوحدة المسؤولة", unitPicker.node),
     row("إسناد إلى", assignPicker.node),
     row(h("span", {}, "توجيه الإسناد"), dirBox),
+    wfPick ? row("مسار العمل", wfPick) : null,
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
@@ -501,6 +553,7 @@ async function upload(cid, file) {
 // ───────── تفاصيل المراسلة ─────────
 async function detailView(id) {
   const c = await api("/correspondences/" + id);
+  const extras = await detailExtras(c); // وسوم، مسار عمل، توقيع، احتجاز (ext.js)
   const dl = async (a) => {
     try {
       const res = await api("/attachments/" + a.id, { raw: true });
@@ -514,7 +567,7 @@ async function detailView(id) {
   const statusSel = sel("status", L.status, c.status);
   const prioSel = sel("priority", L.priority, c.priority);
   const typeSel = sel("type_id", { "": "— نوع المعاملة —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, c.type_id || "", { "aria-label": "نوع المعاملة" });
-  const folderSel = sel("folder_id", { "": "— المجلد —", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }, c.folder_id || "", { "aria-label": "المجلد" });
+  const folderSel = sel("folder_id", { "": "— المجلد —", ...folderOptions() }, c.folder_id || "", { "aria-label": "المجلد" });
   const noteIn = h("input", { placeholder: "ملاحظة (اختياري)" });
   const manage = c.can_manage ? h("div", { class: "card" }, h("h3", {}, "إجراءات"),
     h("div", { class: "row" }, statusSel, prioSel, typeSel, folderSel, noteIn, h("button", { class: "btn", onclick: async () => {
@@ -564,7 +617,7 @@ async function detailView(id) {
       c.summary ? h("p", {}, h("strong", {}, "الملخص: "), c.summary) : null,
       h("div", { class: "row" }, c.can_reply ? h("a", { class: "btn ghost sm", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&party=${encodeURIComponent(c.party)}&subject=${encodeURIComponent("رد: " + c.subject)}` }, "تسجيل رد") : null,
         h("button", { class: "btn ghost sm", onclick: () => window.print() }, "طباعة"))),
-    replyCard, manage, transferBox,
+    replyCard, manage, transferBox, ...extras,
     h("div", { class: "card" }, h("h3", {}, `المرفقات (${c.attachments.length})`),
       c.attachments.length ? h("table", {}, h("tbody", {}, c.attachments.map((a) => h("tr", {},
         h("td", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); dl(a); } }, a.filename)), h("td", {}, sizeStr(a.size)),
@@ -629,19 +682,31 @@ async function loadRefs() {
     all.forEach((c) => (state.clsMap[c.key] = c));
   }
   L.priority = Object.fromEntries(Object.values(state.clsMap).sort((a, b) => a.sort - b.sort).map((c) => [c.key, c.label]));
+  [state.filters, state.prefs] = await Promise.all([api("/me/filters"), api("/me/prefs")]);
+  applyTheme(state.prefs.theme);
+}
+
+// يُحفظ الفلتر الحالي (استعلام الصفحة) باسم يختاره المستخدم، ويظهر في القائمة الجانبية
+async function saveCurrentFilter(kind) {
+  const query = (location.hash.split("?")[1] || "").replace(/&?page=\d+/, "");
+  const name = prompt("اسم الفلتر المحفوظ:");
+  if (!name || !name.trim()) return;
+  try { await api("/me/filters", { method: "POST", body: { name: name.trim(), kind, query } }); toast("حُفظ الفلتر"); await loadRefs(); render(); }
+  catch (e) { toast(e.message, true); }
 }
 
 async function boot() {
   try {
-    state.user = await api("/me");
+    state.user = await api("/me"); // يعمل أيضًا دون رمز عند الدخول الموحّد (SSO) عبر الوسيط الموثوق
     if (!state.user.must_change) await loadRefs();
-  } catch { state.token = null; sessionStorage.removeItem("acp_token"); }
+    if (!boot.polling) { boot.polling = true; setInterval(pollNotifications, 30000); pollNotifications(); }
+  } catch { state.user = null; state.token = null; sessionStorage.removeItem("acp_token"); }
   render();
 }
 
 async function render() {
   const app = document.getElementById("app");
-  if (!state.token || !state.user) return app.replaceChildren(loginView());
+  if (!state.user) return app.replaceChildren(loginView());
   if (state.user.must_change) return app.replaceChildren(changePasswordView(true));
   const [path, qs] = (location.hash || "#/dashboard").slice(1).split("?");
   const q = new URLSearchParams(qs || "");
@@ -651,7 +716,8 @@ async function render() {
     if (path === "/dashboard") view = await dashboardView();
     else if (path === "/list") view = await listView(q);
     else if (path === "/tasks") view = await tasksView();
-    else if (path === "/new") view = newView(q);
+    else if (path === "/new") view = await newView(q);
+    else if (EXT_ROUTES[path]) view = await EXT_ROUTES[path](q);
     else if (path === "/password") view = changePasswordView(false);
     else if (path.startsWith("/c/")) view = await detailView(Number(path.slice(3)));
     else if (path === "/reports" && (isStaff() || can("export"))) view = await reportsView(q);
@@ -671,3 +737,4 @@ render.n = 0;
 
 window.addEventListener("hashchange", render);
 boot();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => { /* التثبيت اختياري */ });

@@ -1,0 +1,15 @@
+{
+  "name": "منصة الاتصالات الإدارية",
+  "short_name": "الاتصالات",
+  "description": "إدارة الصادر والوارد للمراسلات الداخلية والخارجية",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f6f9",
+  "theme_color": "#c2570c",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
