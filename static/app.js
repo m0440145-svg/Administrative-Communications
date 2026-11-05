@@ -350,6 +350,47 @@ async function tasksView() {
 }
 
 // ───────── مراسلة جديدة ─────────
+// قائمة بحث منسدلة + زر «إضافة»؛ المختارون يظهرون كبطاقات قابلة للإزالة (لاختيار أكثر من موظف)
+function peoplePicker(candidates, hint) {
+  const sel$ = new Map();
+  const chips = h("div", { class: "chips" });
+  const renderChips = () => chips.replaceChildren(...[...sel$.values()].map((u) => h("div", { class: "chip" },
+    u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null,
+    h("button", { type: "button", class: "x", "aria-label": "إزالة " + u.full_name, onclick: () => { sel$.delete(u.id); renderChips(); } }, "×"))));
+  let picked = null, active = -1, shown = [];
+  const search = h("input", { type: "search", placeholder: "ابحث عن موظف…", autocomplete: "off", role: "combobox", "aria-label": "بحث عن موظف" });
+  const dd = h("ul", { class: "dd", role: "listbox", hidden: true });
+  const choose = (u) => { picked = u; search.value = u.full_name; dd.hidden = true; };
+  const paint = () => {
+    dd.replaceChildren(...shown.map((u, i) => h("li", { class: i === active ? "on" : "", role: "option", onmousedown: (e) => { e.preventDefault(); choose(u); } },
+      u.full_name, u.job_title ? h("span", { class: "sub" }, " — " + u.job_title) : null)));
+    dd.hidden = !shown.length;
+  };
+  const filter = () => {
+    const t = search.value.trim();
+    shown = candidates.filter((u) => !sel$.has(u.id) && (!t || (u.full_name + " " + (u.job_title || "")).includes(t))).slice(0, 50);
+    active = shown.length ? 0 : -1; paint();
+  };
+  const add = () => {
+    picked = picked || candidates.find((u) => u.full_name === search.value.trim()) || null;
+    if (!picked) return toast("اختر موظفًا من القائمة", true);
+    sel$.set(picked.id, picked); picked = null; search.value = ""; dd.hidden = true; renderChips();
+  };
+  search.addEventListener("input", () => { picked = null; filter(); });
+  search.addEventListener("focus", filter);
+  search.addEventListener("blur", () => setTimeout(() => (dd.hidden = true), 120));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(shown.length - 1, active + 1); paint(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(0, active - 1); paint(); }
+    else if (e.key === "Enter") { e.preventDefault(); if (!dd.hidden && shown[active]) choose(shown[active]); else add(); }
+    else if (e.key === "Escape") dd.hidden = true;
+  });
+  const node = h("div", { class: "replyers" },
+    h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: add }, "إضافة")),
+    chips, hint ? h("div", { class: "small muted" }, hint) : null);
+  return { node, ids: () => [...sel$.keys()] };
+}
+
 function newView(q) {
   const parent = q.get("parent");
   const err = h("div", { class: "err", role: "alert" });
@@ -370,59 +411,25 @@ function newView(q) {
       : (label.classList.add("lb"), req && label.classList.add("req"), label);
     return h("div", { class: "frow2" }, lb, control);
   };
-  const deptOpts = { "": "—", ...deptOptions() };
 
   // تصنيف الوثيقة من جدول التصنيفات؛ تُخفى التصنيفات التي تفوق درجة سريتها صلاحية المستخدم
   const classes = h("div", { class: "classes", role: "group", "aria-label": "تصنيف الوثيقة" },
     state.cls.filter((c) => c.conf_level <= state.user.clearance).map((c) => radio("priority", c.key, c.label, c.key === "normal")));
 
   // الموظفون الذين يحق لهم الرد على الخطاب الوارد (لا يظهر إلا عند اختيار «تحتاج إلى رد: نعم»)
-  // قائمة بحث منسدلة + زر «إضافة»، والمختارون يظهرون كبطاقات قابلة للإزالة
-  const replySel = new Map();
-  const chips = h("div", { class: "chips" });
-  const renderChips = () => chips.replaceChildren(...[...replySel.values()].map((u) => h("div", { class: "chip" },
-    u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null,
-    h("button", { type: "button", class: "x", "aria-label": "إزالة " + u.full_name, onclick: () => { replySel.delete(u.id); renderChips(); } }, "×"))));
-  const candidates = state.users.filter((u) => u.active !== false);
-  let picked = null, active = -1, shown = [];
-  const search = h("input", { type: "search", placeholder: "ابحث عن موظف…", autocomplete: "off", role: "combobox", "aria-label": "بحث عن موظف" });
-  const dd = h("ul", { class: "dd", role: "listbox", hidden: true });
-  const choose = (u) => { picked = u; search.value = u.full_name; dd.hidden = true; };
-  const paint = () => {
-    dd.replaceChildren(...shown.map((u, i) => h("li", { class: i === active ? "on" : "", role: "option", onmousedown: (e) => { e.preventDefault(); choose(u); } },
-      u.full_name, u.job_title ? h("span", { class: "sub" }, " — " + u.job_title) : null)));
-    dd.hidden = !shown.length;
-  };
-  const filter = () => {
-    const t = search.value.trim();
-    shown = candidates.filter((u) => !replySel.has(u.id) && (!t || (u.full_name + " " + (u.job_title || "")).includes(t))).slice(0, 50);
-    active = shown.length ? 0 : -1; paint();
-  };
-  const addReplier = () => {
-    picked = picked || candidates.find((u) => u.full_name === search.value.trim()) || null;
-    if (!picked) return toast("اختر موظفًا من القائمة", true);
-    replySel.set(picked.id, picked); picked = null; search.value = ""; dd.hidden = true; renderChips();
-  };
-  search.addEventListener("input", () => { picked = null; filter(); });
-  search.addEventListener("focus", filter);
-  search.addEventListener("blur", () => setTimeout(() => (dd.hidden = true), 120));
-  search.addEventListener("keydown", (e) => {
-    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(shown.length - 1, active + 1); paint(); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(0, active - 1); paint(); }
-    else if (e.key === "Enter") { e.preventDefault(); if (!dd.hidden && shown[active]) choose(shown[active]); else addReplier(); }
-    else if (e.key === "Escape") dd.hidden = true;
-  });
-  const replyBox = h("div", { class: "replyers" },
-    h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: addReplier }, "إضافة")),
-    chips, h("div", { class: "small muted" }, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة."));
+  const everyone = state.users.filter((u) => u.active !== false);
+  const replyPicker = peoplePicker(everyone, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة.");
+  const assignPicker = peoplePicker(everyone.filter((u) => u.id !== state.user.id), "يمكنك إسناد المراسلة لأكثر من موظف.");
+  const replyBox = replyPicker.node;
   const replyRow = row(h("span", {}, "المخوّلون بالرد"), replyBox);
   replyRow.hidden = true; // يظهر عند اختيار «تحتاج إلى رد: نعم»
 
   const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
-    if (body.needs_reply) body.reply_users = [...replySel.keys()];
-    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id", "department_id", "party_dept_id", "assigned_to",
+    if (body.needs_reply) body.reply_users = replyPicker.ids();
+    if (assignPicker.ids().length) body.assigned_to = assignPicker.ids();
+    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id", "department_id",
       "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
     }
@@ -451,9 +458,8 @@ function newView(q) {
     row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" },
       radio("needs_reply", "1", "نعم", false, () => (replyRow.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyRow.hidden = true)))),
     replyRow,
-    can("see_all") ? row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id)) : null,
-    row("الإدارة المعنية (للداخلي)", sel("party_dept_id", deptOpts, "")),
-    row("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, "")),
+    row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id || "")),
+    row("إسناد إلى", assignPicker.node),
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
@@ -529,8 +535,8 @@ async function detailView(id) {
       m("رقم القيد", h("span", { class: "ltr" }, c.ref_no)), m("النوع", typeLabel(c)),
       m("الجهة", c.party), m("رقم مرجع الجهة", c.party_ref || "—"),
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
-      m("الاستحقاق", c.due_date || "—"), m("الإدارة المسؤولة", c.department_name || "—"), m("الإدارة المعنية", c.party_dept_name || "—"),
-      m("المسؤول الحالي", c.assignee_name || "—"), m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
+      m("الاستحقاق", c.due_date || "—"), m("الوحدة المسؤولة", c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
+      m("المُسنَد إليهم", c.assignees.length ? c.assignees.join("، ") : "—"), m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
       m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
       c.deliverer_name ? m(c.direction === "incoming" ? "مسلّم المراسلة" : "مستلم المراسلة", c.deliverer_name) : null,
       c.deliverer_phone ? m("رقم الجوال", h("span", { class: "ltr" }, c.deliverer_phone)) : null,

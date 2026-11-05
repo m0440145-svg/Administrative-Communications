@@ -271,8 +271,11 @@ def get_visible(ctx, cid):
     return row
 
 
-def can_manage(u, corr):
-    return can(u, "manage_all") or corr["assigned_to"] == u["id"]
+def can_manage(ctx, corr):
+    """مسؤول عن المراسلة: صلاحية شاملة، أو أحد المُسنَد إليهم (الأول أو أي مُحال إليه إحالة سارية)."""
+    u = ctx.user
+    return (can(u, "manage_all") or corr["assigned_to"] == u["id"] or bool(ctx.conn.execute(
+        "SELECT 1 FROM transfers WHERE corr_id=? AND to_user=? AND status IN('pending','done')", (corr["id"], u["id"])).fetchone()))
 
 
 def classes(conn, active_only=True):
@@ -637,15 +640,25 @@ def create_corr(ctx):
     conf = cls["conf_level"]  # درجة السرية تُشتق من التصنيف
     if conf > u["clearance"]:
         raise ApiError(403, "لا يمكنك تسجيل مراسلة بهذا التصنيف لأن درجة سريته أعلى من صلاحيتك")
-    dept = f_int(b, "department_id") if can(u, "see_all") else None
-    dept = dept or u["department_id"]
-    pdept = f_int(b, "party_dept_id")
+    dept = f_int(b, "department_id") or u["department_id"]  # الوحدة المسؤولة: يختارها المسجِّل من أي وحدة
+    pdept = f_int(b, "party_dept_id")  # متروك للتوافق مع الأنظمة المرتبطة؛ لا يظهر في الواجهة
     dept_exists(conn, dept); dept_exists(conn, pdept)
-    assigned = f_int(b, "assigned_to")
-    if assigned:
-        a = user_row(conn, assigned)
+    raw_assignees = b.get("assigned_to")
+    if raw_assignees in (None, ""):
+        raw_assignees = []
+    elif not isinstance(raw_assignees, list):
+        raw_assignees = [raw_assignees]
+    if len(raw_assignees) > 20:
+        raise ApiError(400, "عدد المُسنَد إليهم كبير")
+    assignees = []
+    for x in raw_assignees:
+        uid = f_int({"x": x}, "x", required=True)
+        a = user_row(conn, uid)
         if a["clearance"] < conf:
-            raise ApiError(400, "المستخدم المُسنَد إليه لا يملك صلاحية لهذه الدرجة من السرية")
+            raise ApiError(400, f"الموظف {a['full_name']} لا يملك صلاحية لهذه الدرجة من السرية")
+        if uid not in assignees:
+            assignees.append(uid)
+    assigned = assignees[0] if assignees else None  # المسؤول الأول
     parent = f_int(b, "parent_id")
     folder_id, type_id = f_int(b, "folder_id"), f_int(b, "type_id")
     for table, val in (("folders", folder_id), ("ctypes", type_id)):
@@ -688,9 +701,9 @@ def create_corr(ctx):
             conn.execute("INSERT INTO reply_users(corr_id,user_id) VALUES(?,?)", (cid, rid))
         if parent:
             mark_replied(ctx, parent, ref)
-        if assigned:
+        for aid in assignees:
             conn.execute("INSERT INTO transfers(corr_id,from_user,to_user,instruction,due_date,created_at) VALUES(?,?,?,?,?,?)",
-                         (cid, u["id"], assigned, "إسناد عند التسجيل", due, now()))
+                         (cid, u["id"], aid, "إسناد عند التسجيل", due, now()))
         audit(ctx, "create", "correspondence", cid, ref)
     row = conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
     fire_webhooks("correspondence.created", hook_payload(row))
@@ -721,7 +734,10 @@ def get_corr(ctx):
     c["timeline"] = [dict(r) for r in conn.execute(
         "SELECT at,username,action,detail FROM audit_log WHERE entity='correspondence' AND entity_id=? "
         "AND action<>'view' ORDER BY id", (cid,))]
-    c["can_manage"] = can_manage(ctx.user, c)
+    c["can_manage"] = can_manage(ctx, c)
+    c["assignees"] = [r[0] for r in conn.execute(
+        "SELECT DISTINCT u.full_name FROM transfers t JOIN users u ON u.id=t.to_user "
+        "WHERE t.corr_id=? AND t.status='pending' ORDER BY t.id", (cid,))] or ([c["assignee_name"]] if c["assignee_name"] else [])
     c["can_reply"] = can_reply(ctx, c)
     c["reply_users"] = [dict(r) for r in conn.execute(
         "SELECT ru.user_id, ru.status, ru.done_at, u.full_name FROM reply_users ru JOIN users u ON u.id=ru.user_id "
@@ -743,7 +759,7 @@ def link_reply(ctx):
         raise ApiError(400, "الربط يكون من وارد (الأصل) إلى صادر (الرد)")
     if child["id"] == cid or child["parent_id"]:
         raise ApiError(400, "هذه المراسلة مرتبطة برد سابق أو هي نفسها")
-    if not can_reply(ctx, parent) or not can_manage(ctx.user, child) and child["created_by"] != ctx.user["id"]:
+    if not can_reply(ctx, parent) or not can_manage(ctx, child) and child["created_by"] != ctx.user["id"]:
         raise ApiError(403, "لا تملك صلاحية الربط")
     with tx(ctx.conn):
         ctx.conn.execute("UPDATE correspondences SET parent_id=?, updated_at=? WHERE id=?", (cid, now(), child["id"]))
@@ -756,7 +772,7 @@ def link_reply(ctx):
 def update_corr(ctx):
     cid = int(ctx.params["id"])
     c = get_visible(ctx, cid)
-    if not can_manage(ctx.user, c):
+    if not can_manage(ctx, c):
         raise ApiError(403, "لا تملك صلاحية تعديل هذه المراسلة")
     b, conn = ctx.body, ctx.conn
     sets, p, notes = [], [], []
@@ -802,7 +818,7 @@ def update_corr(ctx):
 def add_transfer(ctx):
     cid = int(ctx.params["id"])
     c = get_visible(ctx, cid)
-    if not can_manage(ctx.user, c):
+    if not can_manage(ctx, c):
         raise ApiError(403, "لا تملك صلاحية إحالة هذه المراسلة")
     if c["status"] in ("closed", "archived"):
         raise ApiError(400, "لا يمكن إحالة مراسلة مغلقة أو مؤرشفة")

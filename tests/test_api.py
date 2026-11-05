@@ -293,6 +293,29 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(call("PUT", f"/api/correspondences/{d2['id']}", {"folder_id": fl[1]["id"]}, c1)[0], 200)
         self.assertGreater(len(call("GET", "/api/reports", token=a)[1]["by_ctype"]), 0)
 
+    def test_09g_multi_assign_and_unit(self):
+        c1 = self.tok["clerk1"]
+        two = [self.uid["emp1"], self.uid["mgr1"]]
+        s, d, _ = self.corr(c1, assigned_to=two, department_id=3, subject="إسناد متعدد")
+        self.assertEqual(s, 201)
+        det = call("GET", f"/api/correspondences/{d['id']}", token=self.tok["emp1"])
+        self.assertEqual(det[0], 200)
+        self.assertEqual(len(det[1]["assignees"]), 2)
+        self.assertEqual(det[1]["department_id"], 3)
+        self.assertTrue(det[1]["can_manage"])  # المُسنَد إليه يدير المراسلة
+        self.assertEqual(call("GET", f"/api/correspondences/{d['id']}", token=self.tok["mgr1"])[0], 200)
+        for t in ("emp1", "mgr1"):
+            self.assertTrue(any(x["id"] == d["id"] for x in call("GET", "/api/tasks", token=self.tok[t])[1]))
+        # موظف عادي يختار الوحدة المسؤولة بنفسه (داخلي)
+        s, d2, _ = call("POST", "/api/correspondences", dict(scope="internal", direction="outgoing", subject="وحدة", party="x",
+                        doc_date="2026-11-05", department_id=4), self.tok["emp1"])
+        self.assertEqual(s, 201)
+        self.assertEqual(call("GET", f"/api/correspondences/{d2['id']}", token=self.tok["emp1"])[1]["department_id"], 4)
+        # إسناد لمن لا يملك صلاحية السرية مرفوض، وقيمة مفردة ما زالت مقبولة
+        s, d3, _ = self.corr(c1, priority="secret", assigned_to=[self.uid["emp1"]])
+        self.assertEqual(s, 400)
+        self.assertEqual(self.corr(c1, assigned_to=self.uid["emp1"])[0], 201)
+
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
         self.assertGreater(d["total"], 0)
