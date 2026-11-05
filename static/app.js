@@ -314,7 +314,8 @@ async function listView(q) {
     kpi("k-total", "📥", k.total, "إجمالي " + (dir === "outgoing" ? "الصادر" : dir === "incoming" ? "الوارد" : "المراسلات"), link({})),
     kpi("k-unread", "✉️", k.unread, "غير مقروءة", link({ read: "unread" })),
     kpi("k-prog", "🕓", k.in_progress, "قيد المعالجة", link({ status: "in_progress" })),
-    kpi("k-urgent", "⏰", k.urgent, "عاجلة", link({ priority: "urgent_all" })));
+    kpi("k-urgent", "⏰", k.urgent, "عاجلة", link({ priority: "urgent_all" })),
+    dir !== "outgoing" ? kpi("k-reply", "↩", k.awaiting_reply ?? 0, "بانتظار الرد (تحتاج رد)", link({ reply: "awaiting" })) : null);
 
   // التحديد الجماعي
   const sel$ = new Set();

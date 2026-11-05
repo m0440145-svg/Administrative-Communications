@@ -765,7 +765,10 @@ def list_corr(ctx):
     kpi = {"total": n(),
            "unread": n("AND NOT EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)", [ctx.user["id"]]),
            "in_progress": n("AND c.status='in_progress'"),
-           "urgent": n(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')")}
+           "urgent": n(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')"),
+           # مراسلات صُنِّفت «تحتاج رد» ولم يُسجَّل عليها رد وما زالت مفتوحة (نفس تعريف فلتر reply=awaiting)
+           "awaiting_reply": n("AND c.needs_reply=1 AND c.status NOT IN('closed','archived') AND NOT EXISTS("
+                               "SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")}
     return 200, {"total": total, "page": page, "size": size, "kpi": kpi, "items": items}
 
 

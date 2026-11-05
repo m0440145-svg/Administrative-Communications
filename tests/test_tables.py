@@ -66,6 +66,20 @@ class SortTest(unittest.TestCase):
         for q in ("by=password_hash", "by=subject&dir=up", "by=1;DROP TABLE users"):
             self.assertEqual(call("GET", "/api/correspondences?" + q.replace(" ", "%20"), token=self.t)[0], 400, q)
 
+    def test_zz_awaiting_reply_kpi(self):
+        kpi = lambda q="direction=incoming": call("GET", "/api/correspondences?" + q, token=self.t)[1]["kpi"]["awaiting_reply"]
+        before = kpi()
+        s, c = call("POST", "/api/correspondences", {"scope": "external", "direction": "incoming", "subject": "تحتاج رد", "party": "جهة", "doc_date": "2026-01-10", "needs_reply": 1}, self.t)
+        self.assertEqual(s, 201, c)
+        call("POST", "/api/correspondences", {"scope": "external", "direction": "incoming", "subject": "لا تحتاج رد", "party": "جهة", "doc_date": "2026-01-10"}, self.t)
+        self.assertEqual(kpi(), before + 1)                       # لا تُحتسب التي لم تُصنَّف «تحتاج رد»
+        awaiting = call("GET", "/api/correspondences?direction=incoming&reply=awaiting", token=self.t)[1]
+        self.assertEqual(awaiting["total"], before + 1)           # الفلتر يطابق العدّاد
+        s, r = call("POST", "/api/correspondences", {"scope": "external", "direction": "outgoing", "subject": "رد", "party": "جهة", "doc_date": "2026-01-11", "parent_id": c["id"]}, self.t)
+        self.assertEqual(s, 201, r)
+        self.assertEqual(kpi(), before)                           # بعد الرد يخرج من العدّاد
+        self.assertEqual(kpi("direction=outgoing"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

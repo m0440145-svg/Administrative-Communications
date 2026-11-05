@@ -230,6 +230,7 @@ input.chk,td input[type=checkbox]{width:auto}
 .k-unread{background:var(--warn-soft)}.k-unread .ico{background:#fed7aa}
 .k-prog{background:var(--info-soft)}.k-prog .ico{background:#bae6fd}
 .k-urgent{background:var(--danger-soft)}.k-urgent .ico{background:#fecaca}
+.k-reply{background:#ede9fe}.k-reply .ico{background:#ddd6fe}@media (prefers-color-scheme:dark){:root:not([data-theme=light]) .k-reply{background:#2a2147}:root:not([data-theme=light]) .k-reply .ico{background:#3b2f6b}}:root[data-theme=dark] .k-reply{background:#2a2147}:root[data-theme=dark] .k-reply .ico{background:#3b2f6b}
 .filters .frow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .filters .frow>select,.filters .frow>input{width:auto;flex:0 1 150px}
 .filters .frow>.grow{flex:1 1 280px}
