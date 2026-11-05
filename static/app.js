@@ -351,14 +351,14 @@ async function tasksView() {
 
 // ───────── مراسلة جديدة ─────────
 // قائمة بحث منسدلة + زر «إضافة»؛ المختارون يظهرون كبطاقات قابلة للإزالة (لاختيار أكثر من موظف)
-function peoplePicker(candidates, hint) {
-  const sel$ = new Map();
+function peoplePicker(candidates, hint, placeholder = "ابحث عن موظف…", initial = []) {
+  const sel$ = new Map(initial.map((u) => [u.id, u]));
   const chips = h("div", { class: "chips" });
   const renderChips = () => chips.replaceChildren(...[...sel$.values()].map((u) => h("div", { class: "chip" },
     u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null,
     h("button", { type: "button", class: "x", "aria-label": "إزالة " + u.full_name, onclick: () => { sel$.delete(u.id); renderChips(); } }, "×"))));
   let picked = null, active = -1, shown = [];
-  const search = h("input", { type: "search", placeholder: "ابحث عن موظف…", autocomplete: "off", role: "combobox", "aria-label": "بحث عن موظف" });
+  const search = h("input", { type: "search", placeholder, autocomplete: "off", role: "combobox", "aria-label": placeholder });
   const dd = h("ul", { class: "dd", role: "listbox", hidden: true });
   const choose = (u) => { picked = u; search.value = u.full_name; dd.hidden = true; };
   const paint = () => {
@@ -385,6 +385,7 @@ function peoplePicker(candidates, hint) {
     else if (e.key === "Enter") { e.preventDefault(); if (!dd.hidden && shown[active]) choose(shown[active]); else add(); }
     else if (e.key === "Escape") dd.hidden = true;
   });
+  renderChips();
   const node = h("div", { class: "replyers" },
     h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: add }, "إضافة")),
     chips, hint ? h("div", { class: "small muted" }, hint) : null);
@@ -421,6 +422,10 @@ function newView(q) {
   const replyPicker = peoplePicker(everyone, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة.");
   const assignPicker = peoplePicker(everyone.filter((u) => u.id !== state.user.id), "يمكنك إسناد المراسلة لأكثر من موظف.");
   const replyBox = replyPicker.node;
+  // الوحدات المسؤولة: واحدة أو أكثر، وتبدأ بوحدة المسجِّل
+  const unitItems = activeDepts().map((d) => ({ id: d.id, full_name: d.name }));
+  const unitPicker = peoplePicker(unitItems, "يمكنك اختيار أكثر من وحدة مسؤولة؛ الأولى هي الأساسية.", "ابحث عن وحدة…",
+    unitItems.filter((d) => d.id === state.user.department_id));
   const replyRow = row(h("span", {}, "المخوّلون بالرد"), replyBox);
   replyRow.hidden = true; // يظهر عند اختيار «تحتاج إلى رد: نعم»
 
@@ -429,7 +434,8 @@ function newView(q) {
     const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
     if (body.needs_reply) body.reply_users = replyPicker.ids();
     if (assignPicker.ids().length) body.assigned_to = assignPicker.ids();
-    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id", "department_id",
+    if (unitPicker.ids().length) body.department_id = unitPicker.ids();
+    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id",
       "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
     }
@@ -458,7 +464,7 @@ function newView(q) {
     row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" },
       radio("needs_reply", "1", "نعم", false, () => (replyRow.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyRow.hidden = true)))),
     replyRow,
-    row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id || "")),
+    row("الوحدة المسؤولة", unitPicker.node),
     row("إسناد إلى", assignPicker.node),
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
@@ -535,7 +541,7 @@ async function detailView(id) {
       m("رقم القيد", h("span", { class: "ltr" }, c.ref_no)), m("النوع", typeLabel(c)),
       m("الجهة", c.party), m("رقم مرجع الجهة", c.party_ref || "—"),
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
-      m("الاستحقاق", c.due_date || "—"), m("الوحدة المسؤولة", c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
+      m("الاستحقاق", c.due_date || "—"), m(c.units.length > 1 ? "الوحدات المسؤولة" : "الوحدة المسؤولة", c.units.length ? c.units.join("، ") : c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
       m("المُسنَد إليهم", c.assignees.length ? c.assignees.join("، ") : "—"), m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
       m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
       c.deliverer_name ? m(c.direction === "incoming" ? "مسلّم المراسلة" : "مستلم المراسلة", c.deliverer_name) : null,

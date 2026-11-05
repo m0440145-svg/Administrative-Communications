@@ -107,6 +107,9 @@ CREATE TABLE IF NOT EXISTS ctypes(
 CREATE TABLE IF NOT EXISTS reply_users(
   corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'pending', done_at TEXT, PRIMARY KEY(corr_id, user_id));
+CREATE TABLE IF NOT EXISTS corr_units(
+  corr_id INTEGER NOT NULL REFERENCES correspondences(id), dept_id INTEGER NOT NULL REFERENCES departments(id),
+  PRIMARY KEY(corr_id, dept_id));
 CREATE TABLE IF NOT EXISTS reads(
   corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
   at TEXT NOT NULL, PRIMARY KEY(corr_id, user_id));
@@ -210,6 +213,8 @@ def init_db():
         for i, (k, label, color, cl, urg) in enumerate(DEFAULT_CLASSES, 1):
             conn.execute("INSERT INTO classifications(key,label,color,conf_level,is_urgent,sort) VALUES(?,?,?,?,?,?)",
                          (k, label, color, cl, urg, i))
+    conn.execute("INSERT OR IGNORE INTO corr_units(corr_id,dept_id) SELECT id, department_id FROM correspondences "
+                 "WHERE department_id IS NOT NULL")  # ترحيل: الوحدة المفردة القديمة تصبح أول وحدة مسؤولة
     for table, names in (("folders", DEFAULT_FOLDERS), ("ctypes", DEFAULT_TYPES)):
         if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0:
             for i, n in enumerate(names, 1):
@@ -258,8 +263,9 @@ def visible_clause(u, alias="c"):
     if can(u, "see_all"):
         return f"({conf})", p
     if u["role"] == "manager" and u["department_id"]:
-        return (f"({conf} AND ({a}.department_id=? OR {a}.party_dept_id=? OR {involved}))",
-                p + [u["department_id"], u["department_id"]] + ip)
+        return (f"({conf} AND ({a}.department_id=? OR {a}.party_dept_id=? OR EXISTS(SELECT 1 FROM corr_units cu "
+                f"WHERE cu.corr_id={a}.id AND cu.dept_id=?) OR {involved}))",
+                p + [u["department_id"]] * 3 + ip)
     return f"({conf} AND ({involved}))", p + ip
 
 
@@ -531,7 +537,8 @@ def build_filters(ctx):
     elif q.get("priority") and ctx.conn.execute("SELECT 1 FROM classifications WHERE key=?", (q["priority"],)).fetchone():
         where.append("c.priority=?"); p.append(q["priority"])
     if q.get("dept", "").isdigit():
-        where.append("c.department_id=?"); p.append(int(q["dept"]))
+        where.append("(c.department_id=? OR EXISTS(SELECT 1 FROM corr_units cu WHERE cu.corr_id=c.id AND cu.dept_id=?))")
+        p += [int(q["dept"])] * 2
     if DATE_RE.match(q.get("from", "")):
         where.append("c.doc_date>=?"); p.append(q["from"])
     if DATE_RE.match(q.get("to", "")):
@@ -640,9 +647,19 @@ def create_corr(ctx):
     conf = cls["conf_level"]  # درجة السرية تُشتق من التصنيف
     if conf > u["clearance"]:
         raise ApiError(403, "لا يمكنك تسجيل مراسلة بهذا التصنيف لأن درجة سريته أعلى من صلاحيتك")
-    dept = f_int(b, "department_id") or u["department_id"]  # الوحدة المسؤولة: يختارها المسجِّل من أي وحدة
+    # الوحدات المسؤولة: واحدة أو أكثر (قيمة مفردة أو قائمة)؛ الأولى هي الأساسية، والافتراضي وحدة المسجِّل
+    raw_units = b.get("department_id")
+    raw_units = [] if raw_units in (None, "") else raw_units if isinstance(raw_units, list) else [raw_units]
+    if len(raw_units) > 20:
+        raise ApiError(400, "عدد الوحدات كبير")
+    units = list(dict.fromkeys(f_int({"x": x}, "x", required=True) for x in raw_units))
+    if not units and u["department_id"]:
+        units = [u["department_id"]]
+    for d_id in units:
+        dept_exists(conn, d_id)
+    dept = units[0] if units else None
     pdept = f_int(b, "party_dept_id")  # متروك للتوافق مع الأنظمة المرتبطة؛ لا يظهر في الواجهة
-    dept_exists(conn, dept); dept_exists(conn, pdept)
+    dept_exists(conn, pdept)
     raw_assignees = b.get("assigned_to")
     if raw_assignees in (None, ""):
         raw_assignees = []
@@ -697,6 +714,8 @@ def create_corr(ctx):
              needs_reply, d_name, d_phone, d_email, d_notes, folder_id, type_id))
         cid = cur.lastrowid
         conn.execute("INSERT INTO reads VALUES(?,?,?)", (cid, u["id"], now()))
+        for d_id in units:
+            conn.execute("INSERT INTO corr_units(corr_id,dept_id) VALUES(?,?)", (cid, d_id))
         for rid in reply_ids:
             conn.execute("INSERT INTO reply_users(corr_id,user_id) VALUES(?,?)", (cid, rid))
         if parent:
@@ -739,6 +758,8 @@ def get_corr(ctx):
         "SELECT DISTINCT u.full_name FROM transfers t JOIN users u ON u.id=t.to_user "
         "WHERE t.corr_id=? AND t.status='pending' ORDER BY t.id", (cid,))] or ([c["assignee_name"]] if c["assignee_name"] else [])
     c["can_reply"] = can_reply(ctx, c)
+    c["units"] = [r[0] for r in conn.execute(
+        "SELECT d.name FROM corr_units cu JOIN departments d ON d.id=cu.dept_id WHERE cu.corr_id=? ORDER BY d.id", (cid,))]
     c["reply_users"] = [dict(r) for r in conn.execute(
         "SELECT ru.user_id, ru.status, ru.done_at, u.full_name FROM reply_users ru JOIN users u ON u.id=ru.user_id "
         "WHERE ru.corr_id=? ORDER BY u.full_name", (cid,))]
@@ -1118,8 +1139,11 @@ def reports(ctx):
         "by_status": rows(f"SELECT c.status AS k, COUNT(*) AS n {base} GROUP BY c.status"),
         "by_class": rows(f"SELECT COALESCE(k.label,c.priority) AS k, COALESCE(k.color,'#475569') AS color, COUNT(*) AS n "
                          f"{base} GROUP BY c.priority ORDER BY k.sort"),
-        "by_unit": rows(f"SELECT COALESCE(d.name,'بدون وحدة') AS k, SUM(c.direction='incoming') AS incoming, "
-                        f"SUM(c.direction='outgoing') AS outgoing, COUNT(*) AS n {base} GROUP BY c.department_id ORDER BY n DESC"),
+        # كل وحدة مسؤولة تُحتسب لها المراسلة (قد تظهر المراسلة في أكثر من وحدة)
+        "by_unit": rows(f"SELECT COALESCE(du.name,'بدون وحدة') AS k, SUM(c.direction='incoming') AS incoming, "
+                        f"SUM(c.direction='outgoing') AS outgoing, COUNT(*) AS n FROM correspondences c "
+                        f"LEFT JOIN corr_units cu ON cu.corr_id=c.id LEFT JOIN departments du ON du.id=cu.dept_id "
+                        f"WHERE {where} GROUP BY cu.dept_id ORDER BY n DESC"),
         "by_month": rows(f"SELECT substr(c.doc_date,1,7) AS k, SUM(c.direction='incoming') AS incoming, "
                          f"SUM(c.direction='outgoing') AS outgoing {base} GROUP BY 1 ORDER BY 1"),
         "by_type": rows(f"SELECT c.scope, c.direction, COUNT(*) AS n {base} GROUP BY 1,2"),

@@ -311,6 +311,17 @@ class ApiTest(unittest.TestCase):
                         doc_date="2026-11-05", department_id=4), self.tok["emp1"])
         self.assertEqual(s, 201)
         self.assertEqual(call("GET", f"/api/correspondences/{d2['id']}", token=self.tok["emp1"])[1]["department_id"], 4)
+        # أكثر من وحدة مسؤولة: يراها مدير أي منها (mgr1 في الوحدة 2) وتُحتسب في كل وحدة
+        s, d4, _ = self.corr(c1, department_id=[3, 2], subject="وحدتان")
+        self.assertEqual(s, 201)
+        det = call("GET", f"/api/correspondences/{d4['id']}", token=self.tok["mgr1"])
+        self.assertEqual(det[0], 200)
+        self.assertEqual(len(det[1]["units"]), 2)
+        self.assertEqual(det[1]["department_id"], 3)  # الأولى هي الأساسية
+        self.assertTrue(any(i["id"] == d4["id"] for i in call("GET", "/api/correspondences?dept=2", token=c1)[1]["items"]))
+        units = {u["k"] for u in call("GET", "/api/reports", token=self.admin)[1]["by_unit"]}
+        self.assertTrue({"الشؤون المالية", "الشؤون الإدارية"} <= units)
+        self.assertEqual(self.corr(c1, department_id=[3, 9999])[0], 400)
         # إسناد لمن لا يملك صلاحية السرية مرفوض، وقيمة مفردة ما زالت مقبولة
         s, d3, _ = self.corr(c1, priority="secret", assigned_to=[self.uid["emp1"]])
         self.assertEqual(s, 400)
