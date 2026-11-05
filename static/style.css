@@ -348,3 +348,20 @@ kbd{background:var(--brand-soft);border:1px solid var(--line);border-bottom-widt
 body.compact main{padding:14px 18px}body.compact .card{padding:10px;margin-bottom:10px}body.compact td,body.compact th{padding:4px 8px}body.compact .btn{padding:5px 12px}body.compact input,body.compact select{padding:5px 8px}
 @media (max-width:820px){.hs-in{width:120px}.crumbs{display:none}.topbar{padding:4px 8px}}
 @media print{.topwrap,.totop{display:none!important}}
+
+/* جداول متقدمة */
+th.sortable{cursor:pointer;user-select:none}th.sortable:hover{color:var(--ink)}th.sortable:focus-visible{outline:2px solid var(--brand-2);outline-offset:-2px}
+th[aria-sort=ascending]::after{content:" ▲";font-size:10px;color:var(--brand)}th[aria-sort=descending]::after{content:" ▼";font-size:10px;color:var(--brand)}
+.tbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px}.tf-in{min-width:220px;max-width:320px;min-height:36px;border-radius:18px;padding-inline:14px}
+.col-off{display:none}
+.tbl-wrap thead th{position:sticky;top:0;background:var(--panel);z-index:1}
+@media (max-width:700px){
+  table.mtbl,table.mtbl tbody,table.mtbl tr,table.mtbl td{display:block;width:100%}
+  table.mtbl thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+  table.mtbl tr{border:1px solid var(--line);border-radius:10px;margin:0 0 10px;padding:6px 10px;background:var(--panel)}
+  table.mtbl td{display:flex;justify-content:space-between;gap:12px;border:0;padding:5px 0;text-align:end}
+  table.mtbl td::before{content:attr(data-label);color:var(--muted);font-size:12px;flex:none;text-align:start}
+  table.mtbl td[data-label=""]::before{content:none}
+  .tf-in{flex:1 1 100%;max-width:none}
+}
+@media print{.tbar{display:none!important}}

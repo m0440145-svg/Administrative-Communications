@@ -725,6 +725,9 @@ def build_filters(ctx):
     return " AND ".join(where), p
 
 
+SORT_COLS = {"ref": "c.ref_no", "subject": "c.subject", "party": "c.party", "date": "c.created_at", "doc_date": "c.doc_date", "status": "c.status", "priority": "c.priority"}
+
+
 @route("GET", r"/api/correspondences")
 def list_corr(ctx):
     where, p = build_filters(ctx)
@@ -735,8 +738,15 @@ def list_corr(ctx):
              "(SELECT COUNT(*) FROM correspondences r WHERE r.parent_id=c.id) AS reply_count, "
              "EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?) AS is_read")
     order = "ASC" if ctx.query.get("sort") == "old" else "DESC"
+    by = ctx.query.get("by")  # فرز بعمود (قائمة بيضاء) مع ثبات الترتيب بالرقم الداخلي
+    if by:
+        if by not in SORT_COLS or ctx.query.get("dir", "asc") not in ("asc", "desc"):
+            raise ApiError(400, "عمود فرز غير صالح")
+        order_sql = f"{SORT_COLS[by]} {ctx.query.get('dir', 'asc').upper()}, c.id {order}"
+    else:
+        order_sql = f"c.id {order}"
     rows = ctx.conn.execute(
-        f"SELECT {FIELDS}, {extra} {JOINS} WHERE {where} ORDER BY c.id {order} LIMIT ? OFFSET ?",
+        f"SELECT {FIELDS}, {extra} {JOINS} WHERE {where} ORDER BY {order_sql} LIMIT ? OFFSET ?",
         [ctx.user["id"]] + p + [size, (page - 1) * size]).fetchall()
     items = [dict(r) for r in rows]
     for fn in EXT_LIST:

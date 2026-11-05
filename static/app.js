@@ -263,7 +263,7 @@ function corrTable(items, compact) {
 
 
 async function listView(q) {
-  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size", "folder", "type", "reply"];
+  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size", "folder", "type", "reply", "by", "dir"];
   const params = new URLSearchParams();
   filters.forEach((k) => q.get(k) && params.set(k, q.get(k)));
   const page = Number(q.get("page") || 1);
@@ -282,6 +282,7 @@ async function listView(q) {
     if (q.get("direction") && !p.get("direction")) p.set("direction", q.get("direction"));
     if (q.get("overdue")) p.set("overdue", "1");
     if (q.get("mine")) p.set("mine", "1");
+    if (q.get("by")) { p.set("by", q.get("by")); p.set("dir", q.get("dir") || "asc"); }  // يبقى الفرز عند تغيير الفلاتر
     location.hash = "#/list?" + p;
   };
   const dd = (name, label, opts) => sel(name, opts, q.get(name), { "aria-label": label, onchange: apply });
