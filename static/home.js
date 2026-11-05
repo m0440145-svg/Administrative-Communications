@@ -78,7 +78,10 @@
 
     const kpiRow = kpi ? h("div", { class: "grid g4" }, tile(kpi.overdue, "متأخرة عن موعدها", "#/list?overdue=1", "warn"), tile(kpi.sla_breached_open, "تجاوزت مهلة SLA", "#/list?overdue=1", "warn"),
       tile(kpi.sla_policy_compliance_pct != null ? kpi.sla_policy_compliance_pct + "٪" : kpi.sla_compliance_pct != null ? kpi.sla_compliance_pct + "٪" : "—", "الالتزام بالمهل", "#/reports"),
-      tile(kpi.avg_close_days != null ? kpi.avg_close_days : "—", "متوسط أيام الإغلاق", "#/reports")) : null;
+      tile(kpi.avg_close_days != null ? kpi.avg_close_days : "—", "متوسط أيام الإغلاق", "#/reports"),
+      ...(Array.isArray(kpi.monthly) && kpi.monthly.length >= 2 && window.sparkline ? [
+        h("a", { class: "card stat spk", href: "#/list" }, h("div", { class: "n" }, kpi.monthly.reduce((s, m) => s + (m.created || 0), 0)), h("div", { class: "l" }, "مسجّلة خلال آخر " + kpi.monthly.length + " شهرًا"), sparkline(kpi.monthly.map((m) => m.created || 0))),
+        h("a", { class: "card stat spk", href: "#/list?status=closed" }, h("div", { class: "n" }, kpi.monthly.reduce((s, m) => s + (m.closed || 0), 0)), h("div", { class: "l" }, "مغلقة خلال الفترة نفسها"), sparkline(kpi.monthly.map((m) => m.closed || 0)))] : [])) : null;
 
     const activity = notif.items.length ? h("ul", { class: "mini" }, notif.items.map((n) => h("li", { class: n.read_at ? "" : "unread" },
       n.corr_id ? h("a", { href: "#/c/" + n.corr_id }, n.title) : h("span", {}, n.title), h("div", { class: "small muted" }, fmtDT(n.created_at))))) : h("div", { class: "empty" }, "لا نشاط حديث");

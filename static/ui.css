@@ -1,0 +1,24 @@
+/* مكونات بصرية مستلهمة من لغة Tabler (مكتوبة من جديد، بأصناف جديدة لا تغيّر القائمة) */
+.ti{flex:none;vertical-align:-3px}.ti-lead{margin-inline-end:6px}
+.tb-btn .ti-lead,.iconbtn .ti-lead{margin:0}
+.navgroup summary > span:first-child{display:inline-flex;align-items:center}
+.ti-empty{display:block;margin:0 auto 8px;opacity:.5;width:38px;height:38px}
+.btn .ti-lead,.acct-item .ti-lead{margin-inline-end:8px}
+
+/* ترويسة بطاقة (Card header) لأقسام الرئيسية */
+.hsec > .row.between{border-bottom:1px solid var(--line);margin:-4px -4px 10px;padding:0 4px 10px}.hsec > .row.between h3{margin:0;font-size:16px}
+
+/* شارة حالة بنقطة ملوّنة */
+.status-dot{display:inline-flex;align-items:center;gap:6px;font-size:13px}.status-dot::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.status-dot.ok{color:var(--ok)}.status-dot.warn{color:var(--accent)}.status-dot.bad{color:var(--danger)}.status-dot.muted{color:var(--muted)}
+
+/* مؤشر خطوات (Steps) */
+.steps{display:flex;gap:0;list-style:none;margin:0;padding:0;counter-reset:s}
+.steps li{flex:1;position:relative;text-align:center;font-size:13px;color:var(--muted);padding-top:30px;counter-increment:s}
+.steps li::before{content:counter(s);position:absolute;top:0;inset-inline-start:calc(50% - 12px);width:24px;height:24px;border-radius:50%;background:var(--line);color:var(--ink);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;z-index:1}
+.steps li::after{content:"";position:absolute;top:11px;inset-inline-start:-50%;width:100%;height:2px;background:var(--line)}.steps li:first-child::after{display:none}
+.steps li.done{color:var(--ink)}.steps li.done::before,.steps li.done::after{background:var(--ok)}.steps li.done::before{color:#fff}
+.steps li.cur{color:var(--brand);font-weight:700}.steps li.cur::before{background:var(--brand-2);color:#fff}
+
+/* KPI مع خط اتجاه */
+.stat.spk{display:flex;flex-direction:column;gap:6px}.stat .spark{color:var(--brand-2);align-self:flex-start;margin-top:2px}.stat.spk.neg .spark{color:var(--danger)}
