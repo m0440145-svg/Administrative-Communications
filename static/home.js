@@ -26,6 +26,7 @@
         h("button", { class: "btn ghost", onclick: close }, "إغلاق (Esc)")));
     document.body.append(box); box.querySelector("button").focus();
   };
+  window.__acp = { showHelp, setPrivacy };
   document.addEventListener("keydown", (e) => {
     if (typeof state === "undefined" || !state.user) return;
     if (e.key === "Escape") { const k = document.getElementById("kbhelp"); if (k) k.remove(); return; }
