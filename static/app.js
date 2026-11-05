@@ -412,9 +412,11 @@ function newView(q) {
     else if (e.key === "Enter") { e.preventDefault(); if (!dd.hidden && shown[active]) choose(shown[active]); else addReplier(); }
     else if (e.key === "Escape") dd.hidden = true;
   });
-  const replyBox = h("div", { class: "replyers", hidden: true },
+  const replyBox = h("div", { class: "replyers" },
     h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: addReplier }, "إضافة")),
     chips, h("div", { class: "small muted" }, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة."));
+  const replyRow = row(h("span", {}, "المخوّلون بالرد"), replyBox);
+  replyRow.hidden = true; // يظهر عند اختيار «تحتاج إلى رد: نعم»
 
   const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
@@ -447,8 +449,11 @@ function newView(q) {
     row("نوع المعاملة", sel("type_id", { "": "— اختر —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, "")),
     row("المجلد", sel("folder_id", { "": "— بدون مجلد —", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }, "")),
     row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" },
-      radio("needs_reply", "1", "نعم", false, () => (replyBox.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyBox.hidden = true)))),
-    row(h("span", {}, "المخوّلون بالرد"), replyBox),
+      radio("needs_reply", "1", "نعم", false, () => (replyRow.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyRow.hidden = true)))),
+    replyRow,
+    can("see_all") ? row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id)) : null,
+    row("الإدارة المعنية (للداخلي)", sel("party_dept_id", deptOpts, "")),
+    row("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, "")),
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
@@ -456,10 +461,7 @@ function newView(q) {
       row(dl("واردة عبر البريد الإلكتروني", "صادرة عبر البريد الإلكتروني"), h("input", { name: "deliverer_email", maxlength: 150, type: "email", dir: "ltr", placeholder: "البريد الإلكتروني" })),
       row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date", required: true, value: today() }), true),
       row("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
-      row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" })),
-      can("see_all") ? row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id)) : null,
-      row("الإدارة المعنية (للداخلي)", sel("party_dept_id", deptOpts, "")),
-      row("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, ""))),
+      row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" }))),
     err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));
   syncDir();
   return [title, form];
