@@ -109,7 +109,15 @@ input.chk,td input[type=checkbox]{width:auto}
 /* نموذج التسجيل */
 [hidden]{display:none!important}
 .classes:empty{display:none}
-.replyers .full{flex:1 0 100%}
+.combo{display:flex;gap:8px;align-items:flex-start}
+.cbx{position:relative;flex:1}
+.dd{position:absolute;top:100%;inset-inline:0;margin:2px 0 0;padding:4px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;max-height:220px;overflow:auto;box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:10}
+.dd li{padding:7px 10px;border-radius:6px;cursor:pointer}
+.dd li.on,.dd li:hover{background:var(--brand-2);color:#fff}
+.dd .sub{opacity:.75;font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.chip{display:inline-flex;align-items:center;gap:8px;background:var(--brand-soft);border:1px solid var(--line);border-radius:8px;padding:5px 6px 5px 10px}
+.chip .x{border:0;background:transparent;font-size:18px;line-height:1;cursor:pointer;color:var(--danger)}
 .fm{max-width:none;padding:0}
 .frow2{display:grid;grid-template-columns:210px 1fr;gap:14px;align-items:start;padding:12px 20px;border-bottom:1px solid var(--line)}
 .frow2 .lb{font-size:14px;color:var(--ink);padding-top:8px}

@@ -377,15 +377,49 @@ function newView(q) {
     state.cls.filter((c) => c.conf_level <= state.user.clearance).map((c) => radio("priority", c.key, c.label, c.key === "normal")));
 
   // الموظفون الذين يحق لهم الرد على الخطاب الوارد (لا يظهر إلا عند اختيار «تحتاج إلى رد: نعم»)
-  const replyBox = h("div", { class: "classes replyers", hidden: true, role: "group", "aria-label": "المخوّلون بالرد" },
-    h("div", { class: "small muted full" }, "اختر الموظفين المسموح لهم بالرد؛ إن لم تختر أحدًا فيحق الرد لكل من يطّلع على المراسلة."),
-    state.users.filter((u) => u.active !== false).map((u) => h("label", { class: "opt" },
-      h("input", { type: "checkbox", name: "reply_user", value: u.id }), u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null)));
+  // قائمة بحث منسدلة + زر «إضافة»، والمختارون يظهرون كبطاقات قابلة للإزالة
+  const replySel = new Map();
+  const chips = h("div", { class: "chips" });
+  const renderChips = () => chips.replaceChildren(...[...replySel.values()].map((u) => h("div", { class: "chip" },
+    u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null,
+    h("button", { type: "button", class: "x", "aria-label": "إزالة " + u.full_name, onclick: () => { replySel.delete(u.id); renderChips(); } }, "×"))));
+  const candidates = state.users.filter((u) => u.active !== false);
+  let picked = null, active = -1, shown = [];
+  const search = h("input", { type: "search", placeholder: "ابحث عن موظف…", autocomplete: "off", role: "combobox", "aria-label": "بحث عن موظف" });
+  const dd = h("ul", { class: "dd", role: "listbox", hidden: true });
+  const choose = (u) => { picked = u; search.value = u.full_name; dd.hidden = true; };
+  const paint = () => {
+    dd.replaceChildren(...shown.map((u, i) => h("li", { class: i === active ? "on" : "", role: "option", onmousedown: (e) => { e.preventDefault(); choose(u); } },
+      u.full_name, u.job_title ? h("span", { class: "sub" }, " — " + u.job_title) : null)));
+    dd.hidden = !shown.length;
+  };
+  const filter = () => {
+    const t = search.value.trim();
+    shown = candidates.filter((u) => !replySel.has(u.id) && (!t || (u.full_name + " " + (u.job_title || "")).includes(t))).slice(0, 50);
+    active = shown.length ? 0 : -1; paint();
+  };
+  const addReplier = () => {
+    picked = picked || candidates.find((u) => u.full_name === search.value.trim()) || null;
+    if (!picked) return toast("اختر موظفًا من القائمة", true);
+    replySel.set(picked.id, picked); picked = null; search.value = ""; dd.hidden = true; renderChips();
+  };
+  search.addEventListener("input", () => { picked = null; filter(); });
+  search.addEventListener("focus", filter);
+  search.addEventListener("blur", () => setTimeout(() => (dd.hidden = true), 120));
+  search.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(shown.length - 1, active + 1); paint(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(0, active - 1); paint(); }
+    else if (e.key === "Enter") { e.preventDefault(); if (!dd.hidden && shown[active]) choose(shown[active]); else addReplier(); }
+    else if (e.key === "Escape") dd.hidden = true;
+  });
+  const replyBox = h("div", { class: "replyers", hidden: true },
+    h("div", { class: "combo" }, h("div", { class: "cbx" }, search, dd), h("button", { type: "button", class: "btn sm", onclick: addReplier }, "إضافة")),
+    chips, h("div", { class: "small muted" }, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة."));
 
   const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
-    if (body.needs_reply) body.reply_users = [...form.querySelectorAll("input[name=reply_user]:checked")].map((x) => Number(x.value));
+    if (body.needs_reply) body.reply_users = [...replySel.keys()];
     for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id", "department_id", "party_dept_id", "assigned_to",
       "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
