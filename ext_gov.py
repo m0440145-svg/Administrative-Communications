@@ -188,6 +188,8 @@ def install(S):
                 except FileNotFoundError:
                     pass
                 ctx.conn.execute("UPDATE attachments SET removed_at=? WHERE id=?", (now(), a["id"]))
+                if hasattr(S, "purge_att_versions"):  # الإصدارات القديمة للمرفق تُتلف معه (ext_edms)
+                    S.purge_att_versions(ctx.conn, a["id"])
             ctx.conn.execute("UPDATE correspondences SET disposed_at=?, updated_at=? WHERE id=?", (now(), now(), cid))
             ctx.conn.execute("INSERT INTO disposal_log(corr_id,ref_no,subject,disposed_by,disposed_at,reason,attachments) VALUES(?,?,?,?,?,?,?)",
                              (cid, c["ref_no"], c["subject"], ctx.user["id"], now(), reason,

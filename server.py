@@ -1110,7 +1110,7 @@ def upload(ctx):
     if n <= 0:
         raise ApiError(400, "الملف فارغ")
     if n > MAX_UPLOAD:
-        raise ApiError(413, "حجم الملف يتجاوز 20 ميغابايت")
+        raise ApiError(413, f"حجم الملف يتجاوز {MAX_UPLOAD // (1024 * 1024)} ميغابايت")
     data = ctx.h.rfile.read(n)
     stored = secrets.token_hex(16)
     digest = hashlib.sha256(data).hexdigest()  # البصمة دائمًا للنص الأصلي (قبل أي تشفير)
@@ -1727,7 +1727,7 @@ def load_extensions():
     """تحميل الوحدات الملحقة (كل وحدة تضيف جداولها ومساراتها دون المساس بالنواة)."""
     import importlib
     me = sys.modules[__name__]
-    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec", "ext_brand", "ext_scan", "ext_tasks", "ext_browse", "ext_harden"):
+    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec", "ext_brand", "ext_scan", "ext_tasks", "ext_browse", "ext_edms", "ext_harden"):
         importlib.import_module(name).install(me)
 
 

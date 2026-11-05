@@ -392,3 +392,6 @@ a.facet:hover{border-color:var(--brand-2);box-shadow:0 4px 14px #0001;text-decor
 .views{display:flex;gap:10px;flex-wrap:wrap}.view{display:flex;align-items:center;gap:10px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;color:var(--ink);background:var(--panel)}
 .view:hover{border-color:var(--brand-2);text-decoration:none;background:var(--brand-soft)}.vn{font-weight:700;color:var(--brand);font-size:18px;min-width:24px;text-align:center}
 @media print{.cal-more summary{display:none}}
+
+/* إصدارات المرفقات */
+.vdlg{width:min(940px,96vw)}.vup{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}.vup input[type=file]{max-width:260px}

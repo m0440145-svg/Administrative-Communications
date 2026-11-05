@@ -139,7 +139,7 @@ function shell(content, taskCount) {
     ...(role === "admin" ? [
       { id: "adm1", title: "🏢 الهيكل والصلاحيات", items: [["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/perms", "الصلاحيات"], ["#/admin/security", "سياسات الأمان"]] },
       { id: "adm2", title: "🗂 التصنيف والمسارات", items: [["#/admin/classes", "التصنيفات والخصوصية"], ["#/admin/folders", "المجلدات"], ["#/admin/types", "أنواع المعاملات"], ["#/admin/directives", "توجيهات الإسناد"],
-        ["#/admin/workflows", "مسارات العمل"], ["#/admin/rules", "قواعد التوجيه"], ["#/admin/templates", "القوالب"], ["#/admin/sla", "اتفاقيات الخدمة SLA"]] },
+        ["#/admin/workflows", "مسارات العمل"], ["#/admin/rules", "قواعد التوجيه"], ["#/admin/templates", "القوالب"], ["#/admin/sla", "اتفاقيات الخدمة SLA"], ["#/admin/fields", "الحقول المخصصة"]] },
       { id: "adm3", title: "⚙️ التشغيل والحوكمة", items: [["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/branding", "الهوية والترويسة"], ["#/admin/files", "الملفات والمسح"],
         ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]] },
     ] : []),
