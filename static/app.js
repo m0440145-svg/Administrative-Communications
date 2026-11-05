@@ -95,17 +95,17 @@ function logoutLocal() {
 
 // ───────── الإطار العام ─────────
 const NAV = [
-  ["#/dashboard", "لوحة المعلومات"],
-  ["#/tasks", "معاملاتي"],
+  ["#/dashboard", "لوحة التحكم"],
+  ["#/tasks", "مهامي"],
   ["#/new", "تسجيل مراسلة جديدة"],
   ["sep", "المراسلات"],
   ["#/list?direction=incoming", "الوارد"],
   ["#/list?direction=outgoing", "الصادر"],
-  ["#/list", "كل المراسلات"],
+  ["#/list", "المعاملات"],
 ];
-const REPORT_NAV = [["#/reports", "التقارير"]];
-const ADMIN_NAV = [["sep", "لوحة التحكم"], ["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/classes", "التصنيفات والخصوصية"],
-  ["#/admin/perms", "الصلاحيات"], ["#/admin/audit", "سجل التدقيق"], ["#/admin/integration", "التكامل (API)"]];
+const REPORT_NAV = [["#/reports", "التقارير والمؤشرات"]];
+const ADMIN_NAV = [["sep", "إعدادات النظام"], ["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/classes", "التصنيفات والخصوصية"],
+  ["#/admin/perms", "الصلاحيات"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]];
 
 function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
@@ -175,7 +175,7 @@ async function dashboardView() {
     const n = (s) => (d.by_type.find((t) => t.scope === s && t.direction === dir) || {}).n || 0;
     return stat(n("external") + n("internal"), `${L.direction[dir]} (خارجي ${n("external")} · داخلي ${n("internal")})`, `#/list?direction=${dir}`);
   });
-  return [h("h2", {}, "لوحة المعلومات"),
+  return [h("h2", {}, "لوحة التحكم"),
     h("div", { class: "grid g4" }, stat(d.total, "إجمالي المراسلات", "#/list"), stat(d.my_tasks, "إحالات بانتظارك", "#/tasks"),
       stat(d.overdue, "متأخرة عن موعدها", "#/list?overdue=1", true), stat(d.urgent_open, "عاجلة مفتوحة", "#/list?priority=urgent_all")),
     h("div", { class: "grid g4", }, typeRows),
@@ -213,7 +213,7 @@ async function listView(q) {
   params.set("page", page);
   const data = await api("/correspondences?" + params);
   const dir = q.get("direction");
-  const title = { incoming: "البريد الوارد", outgoing: "البريد الصادر" }[dir] || "كل المراسلات";
+  const title = { incoming: "البريد الوارد", outgoing: "البريد الصادر" }[dir] || "المعاملات";
   const subtitle = { incoming: "إدارة الرسائل والمراسلات الواردة", outgoing: "إدارة الرسائل والمراسلات الصادرة" }[dir] || "كل الوارد والصادر، الداخلي والخارجي";
   const base = new URLSearchParams();
   ["scope", "direction"].forEach((k) => q.get(k) && base.set(k, q.get(k)));
@@ -331,7 +331,7 @@ async function exportCsv(params) {
 // ───────── معاملاتي ─────────
 async function tasksView() {
   const tasks = await api("/tasks");
-  return [h("h2", {}, "معاملاتي (الإحالات بانتظار إجرائي)"),
+  return [h("h2", {}, "مهامي (الإحالات والطلبات بانتظار إجرائي)"),
     tasks.length === 0 ? h("div", { class: "card empty" }, "لا توجد إحالات معلّقة 🎉") :
       tasks.map((t) => {
         const note = h("input", { placeholder: "ملاحظة التنفيذ (اختياري)" });
@@ -525,7 +525,7 @@ async function detailView(id) {
   const toSel = sel("to_user", Object.fromEntries(state.users.map((u) => [u.id, `${u.full_name} — ${L.role[u.role]}`])), "");
   const instr = h("input", { placeholder: "التوجيه / المطلوب" });
   const due = h("input", { type: "date" });
-  const transferBox = c.can_manage && !["closed", "archived"].includes(c.status) ? h("div", { class: "card" }, h("h3", {}, "إحالة المراسلة"),
+  const transferBox = c.can_manage && !["closed", "archived"].includes(c.status) ? h("div", { class: "card" }, h("h3", {}, "إحالة جديدة وتوجيه"),
     h("div", { class: "row" }, toSel, instr, due, h("button", { class: "btn", onclick: async () => {
       try { await api(`/correspondences/${id}/transfers`, { method: "POST", body: { to_user: toSel.value, instruction: instr.value, due_date: due.value } }); toast("تمت الإحالة"); render(); }
       catch (e) { toast(e.message, true); }
@@ -575,11 +575,11 @@ async function detailView(id) {
         try { await upload(id, fileIn.files[0]); toast("تم رفع الملف"); render(); } catch (e) { toast(e.message, true); }
       } }, "رفع")) : null),
     h("div", { class: "grid g2" },
-      h("div", { class: "card" }, h("h3", {}, "مسار الإحالات"), c.transfers.length ? h("ul", { class: "tl" }, c.transfers.map((t) => h("li", {},
+      h("div", { class: "card" }, h("h3", {}, "الإحالات والتوجيه"), c.transfers.length ? h("ul", { class: "tl" }, c.transfers.map((t) => h("li", {},
         h("strong", {}, t.from_name), " ← ", h("strong", {}, t.to_name), " ", pill(t.status === "done" ? "closed" : t.status === "pending" ? "in_progress" : "archived", { done: "منفّذة", pending: "معلّقة", superseded: "أُعيدت إحالتها" }[t.status]),
         h("div", { class: "small muted" }, fmtDT(t.created_at), t.instruction ? " — " + t.instruction : ""),
         t.note ? h("div", { class: "small" }, "ملاحظة التنفيذ: " + t.note) : null))) : h("div", { class: "muted" }, "لم تُحَل بعد")),
-      h("div", { class: "card" }, h("h3", {}, "سجل العمليات"), h("ul", { class: "tl" }, c.timeline.map((t) => h("li", {},
+      h("div", { class: "card" }, h("h3", {}, "سجل الإجراءات"), h("ul", { class: "tl" }, c.timeline.map((t) => h("li", {},
         h("strong", {}, L.action[t.action] || t.action), " — ", t.username, h("div", { class: "small muted" }, fmtDT(t.at), t.detail ? " — " + t.detail : "")))))),
     c.replies.length ? h("div", { class: "card" }, h("h3", {}, "الردود والمراسلات المرتبطة"), corrTable(c.replies.map((r) => ({ ...r, party: "" })), true)) : null,
   ];
@@ -588,7 +588,7 @@ async function detailView(id) {
 // ───────── الإدارة ─────────
 async function auditView() {
   const rows = await api("/admin/audit?limit=300");
-  return [h("h2", {}, "سجل التدقيق"), h("p", { class: "muted small" }, "كل العمليات (الدخول، التسجيل، الإحالة، التنزيل، التصدير…) مع المستخدم وعنوان الشبكة. السجل للقراءة فقط."),
+  return [h("h2", {}, "سجل الإجراءات"), h("p", { class: "muted small" }, "كل العمليات (الدخول، التسجيل، الإحالة، التنزيل، التصدير…) مع المستخدم وعنوان الشبكة. السجل للقراءة فقط."),
     h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الوقت", "المستخدم", "العملية", "التفاصيل", "IP"].map((t) => h("th", {}, t)))),
       h("tbody", {}, rows.map((r) => h("tr", {}, h("td", { class: "ltr small" }, fmtDT(r.at)), h("td", {}, r.username || "—"), h("td", {}, L.action[r.action] || r.action),
         h("td", { class: "small" }, r.entity_id ? h("a", { href: "#/c/" + r.entity_id }, r.detail || "") : r.detail || ""), h("td", { class: "ltr small" }, r.ip))))))];

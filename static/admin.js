@@ -2,10 +2,10 @@
 // لوحة التحكم (الوحدات، الموظفون، التصنيفات والخصوصية، الصلاحيات) والتقارير.
 // تعتمد على الدوال العامة في app.js (h, api, toast, f, sel, pill, state, L ...) وتُستدعى بعد تحميل الصفحة.
 
-const ADMIN_TABS = [["units", "الوحدات"], ["staff", "الموظفون"], ["classes", "التصنيفات والخصوصية"], ["folders", "المجلدات"], ["types", "أنواع المعاملات"], ["directives", "توجيهات الإسناد"], ["perms", "الصلاحيات"], ["audit", "سجل التدقيق"], ["integration", "التكامل"]];
+const ADMIN_TABS = [["units", "الوحدات"], ["staff", "الموظفون"], ["classes", "التصنيفات والخصوصية"], ["folders", "المجلدات"], ["types", "أنواع المعاملات"], ["directives", "توجيهات الإسناد"], ["perms", "الصلاحيات"], ["audit", "سجل الإجراءات"], ["integration", "التكامل"]];
 
 function adminHead(current, title, note) {
-  return [h("h2", {}, "لوحة التحكم"),
+  return [h("h2", {}, "إعدادات النظام"),
     h("div", { class: "tabs" }, ADMIN_TABS.map(([k, t]) => h("a", { href: "#/admin/" + k, class: "tab" + (k === current ? " on" : "") }, t))),
     h("h3", {}, title), note ? h("p", { class: "muted small" }, note) : null];
 }
@@ -185,7 +185,7 @@ async function reportsView(q) {
   };
   const sec = (title, body) => h("div", { class: "card" }, h("h3", {}, title), body);
   const type = (s, dr) => (d.by_type.find((t) => t.scope === s && t.direction === dr) || {}).n || 0;
-  return [h("h2", {}, "التقارير"), form,
+  return [h("h2", {}, "التقارير والمؤشرات"), form,
     h("div", { class: "grid g4" }, stat(d.total, "إجمالي المراسلات"), stat(d.overdue, "متأخرة عن موعدها"), stat(d.awaiting_reply, "تحتاج رد ولم يُرد عليها"), stat(d.avg_close_days, "متوسط أيام الإنجاز")),
     h("div", { class: "grid g2" },
       sec("حسب الوحدة (وارد + صادر)", bars(d.by_unit, (r) => `${r.k}  (وارد ${r.incoming} · صادر ${r.outgoing})`, (r) => r.n)),
