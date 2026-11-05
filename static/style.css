@@ -286,3 +286,22 @@ table.mail input[type=checkbox]{width:auto}
 .about-txt{white-space:pre-wrap;line-height:1.9;margin:0}
 .lt-logo{max-height:70px;max-width:110px;object-fit:contain}.lt-head{align-items:center;gap:12px}
 input[type=color]{width:48px;height:34px;padding:2px;cursor:pointer}
+
+/* الصفحة الرئيسية المحسّنة */
+.skip{position:absolute;inset-inline-start:8px;top:-60px;background:var(--brand-2);color:#fff;padding:8px 14px;border-radius:8px;z-index:100}.skip:focus{top:8px}
+.home-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}.home-head h2{margin:0 0 2px}
+.quick{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.quick .btn{padding:10px 16px;font-size:15px}
+.row.between{justify-content:space-between;align-items:center}
+.alerts{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.alert{display:block;padding:9px 14px;border-radius:8px;border:1px solid var(--line);border-inline-start-width:5px;background:var(--panel);color:var(--ink)}.alert:hover{text-decoration:none;background:var(--brand-soft)}
+.alert.bad{border-inline-start-color:var(--danger)}.alert.warn{border-inline-start-color:var(--accent)}.alert.info{border-inline-start-color:var(--brand-2)}
+.mini{list-style:none;margin:0;padding:0}.mini li{padding:8px 0;border-bottom:1px solid var(--line)}.mini li:last-child{border-bottom:0}.mini li.unread{font-weight:600}
+.secstate{list-style:none;margin:0 0 10px;padding:0;display:grid;gap:4px}.secstate .ok::first-letter{color:var(--ok)}.secstate .bad{color:var(--danger);font-weight:600}
+.home-sub{margin:22px 0 10px;color:var(--muted)}
+.skel{height:80px;border-radius:8px;background:linear-gradient(90deg,var(--line),var(--brand-soft),var(--line));background-size:200% 100%;animation:sk 1.2s infinite}@keyframes sk{to{background-position:-200% 0}}
+body.privacy .sens a,body.privacy .sens strong,body.privacy tr.sens td:nth-child(3){filter:blur(6px);transition:filter .15s}
+body.privacy .sens:hover a,body.privacy .sens:hover strong,body.privacy .sens:focus-within a,body.privacy .sens:focus-within strong,body.privacy tr.sens:hover td:nth-child(3){filter:none}
+.kbhelp{position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;z-index:200}.kbhelp .card{min-width:300px;max-width:90vw}
+kbd{background:var(--brand-soft);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 8px;font-family:Consolas,monospace;direction:ltr;display:inline-block}
+@media (prefers-reduced-motion:reduce){.skel{animation:none}}
+@media (max-width:700px){.quick .btn{flex:1 1 45%;text-align:center}.home-head{flex-direction:column}}

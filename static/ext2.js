@@ -23,7 +23,7 @@ function scanBox() {
 
 document.addEventListener("keydown", (e) => {
   const t = e.target;
-  if (!window.state || !state.user || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (typeof state === "undefined" || !state.user || e.ctrlKey || e.metaKey || e.altKey) return;
   if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
   if (e.key === "/") { const s = document.getElementById("scanbox"); if (s) { e.preventDefault(); s.focus(); } }
   else if (e.key.toLowerCase() === "n") location.hash = "#/new";
