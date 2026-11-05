@@ -47,9 +47,10 @@
 
   dashboardView = async () => {
     const role = state.user.role, leader = ["admin", "manager"].includes(role);
-    const [tasksR, notifR, mfaR, kpiR, orgR] = await Promise.allSettled([api("/tasks"), api("/notifications?limit=6"), api("/me/mfa"),
-      isStaff() || can("export") ? api("/kpi") : Promise.reject(), api("/org/profile")]);
+    const [tasksR, notifR, mfaR, kpiR, orgR, wtR] = await Promise.allSettled([api("/tasks"), api("/notifications?limit=6"), api("/me/mfa"),
+      isStaff() || can("export") ? api("/kpi") : Promise.reject(), api("/org/profile"), api("/work-tasks/summary")]);
     const val = (r, d) => (r.status === "fulfilled" ? r.value : d);
+    const wt = val(wtR, { open: 0, overdue: 0, due_today: 0 });
     const tasks = val(tasksR, []), notif = val(notifR, { items: [], unread: 0 }), mfa = val(mfaR, null), kpi = val(kpiR, null), org = val(orgR, {});
 
     const quick = [["✉️ تسجيل مراسلة", "#/new", "N"], ["📥 الوارد", "#/list?direction=incoming"], ["📤 الصادر", "#/list?direction=outgoing"], ["🔎 بحث متقدم", "#/search"],
@@ -72,6 +73,8 @@
     if (urgent.length) alerts.push(["warn", `${urgent.length} من مهامك عاجلة أو متأخرة`, "#/tasks"]);
     if (kpi && kpi.sla_breached_open) alerts.push(["bad", `${kpi.sla_breached_open} معاملة تجاوزت مهلة SLA`, "#/list?overdue=1"]);
     if (kpi && kpi.overdue) alerts.push(["warn", `${kpi.overdue} معاملة متأخرة عن موعدها`, "#/list?overdue=1"]);
+    if (wt.overdue) alerts.push(["bad", `${wt.overdue} من مهام المتابعة متأخرة`, "#/tasks"]);
+    else if (wt.due_today) alerts.push(["warn", `${wt.due_today} من مهام المتابعة تستحق اليوم`, "#/tasks"]);
     if (notif.unread) alerts.push(["info", `${notif.unread} إشعار غير مقروء`, "#/notifications"]);
     if (mfa && mfa.required && !mfa.enabled) alerts.push(["bad", "حسابك يتطلب تفعيل المصادقة الثنائية", "#/security"]);
     const alertBox = alerts.length ? h("div", { class: "alerts", role: "status" }, alerts.map(([tone, txt, href]) => h("a", { class: "alert " + tone, href }, txt, " ←"))) : h("div", { class: "muted small" }, "✔ لا تنبيهات حاليًا");

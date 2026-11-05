@@ -366,3 +366,10 @@ th[aria-sort=ascending]::after{content:" ▲";font-size:10px;color:var(--brand)}
   .tf-in{flex:1 1 100%;max-width:none}
 }
 @media print{.tbar{display:none!important}}
+
+/* المهام */
+.tdlg{width:min(560px,94vw);max-height:92vh;overflow:auto;margin:0}.tdlg h3{margin-top:0}
+.wtask{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}.wtask:last-child{border-bottom:0}
+.wtask.done .wt-main strong{text-decoration:line-through;opacity:.7}.wtask.late{border-inline-start:4px solid var(--danger);padding-inline-start:10px}
+.wt-act{display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap}.wt-main{min-width:0}
+@media (max-width:700px){.wtask{flex-direction:column}}
