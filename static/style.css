@@ -109,6 +109,10 @@ input.chk,td input[type=checkbox]{width:auto}
 /* نموذج التسجيل */
 [hidden]{display:none!important}
 .classes:empty{display:none}
+.dirgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px 18px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.dirgrid .opt input{width:18px;height:18px;accent-color:var(--brand-2)}
+.dirgrid .other{grid-column:1}
+.dirgrid .dir-other{grid-column:span 2;width:100%;border-style:dotted}
 .combo{display:flex;gap:8px;align-items:flex-start}
 .cbx{position:relative;flex:1}
 .dd{position:absolute;top:100%;inset-inline:0;margin:2px 0 0;padding:4px;list-style:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;max-height:220px;overflow:auto;box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:10}

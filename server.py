@@ -49,8 +49,11 @@ DEFAULT_CLASSES = [  # key, label, color, conf_level, is_urgent
     ("secret", "سري", "#7c3aed", 1, 0), ("normal", "عادي", "#475569", 0, 0), ("low", "غير مهم", "#94a3b8", 0, 0)]
 USER_COLUMNS = {"job_title": "TEXT", "phone": "TEXT", "email": "TEXT"}
 NEW_COLUMNS = {"needs_reply": "INTEGER NOT NULL DEFAULT 0", "deliverer_name": "TEXT", "deliverer_phone": "TEXT",
-               "deliverer_email": "TEXT", "delivery_notes": "TEXT", "folder_id": "INTEGER", "type_id": "INTEGER"}
-LOOKUPS = {"folders": "folders", "types": "ctypes"}
+               "deliverer_email": "TEXT", "delivery_notes": "TEXT", "folder_id": "INTEGER", "type_id": "INTEGER",
+               "directive_other": "TEXT"}
+LOOKUPS = {"folders": "folders", "types": "ctypes", "directives": "directives"}
+DEFAULT_DIRECTIVES = ["لإكمال اللازم", "للاطلاع", "للدراسة والإفادة", "للعمل بموجبه", "للتنسيق", "للرد", "شكر", "تهنئة", "إفادة",
+                      "للمفاهمة حضوريًا", "للمفاهمة هاتفيًا", "لكتابة خطاب", "تقرير", "للمتابعة والإفادة", "للحفظ", "اعتذار", "تأكيد استلام"]
 DEFAULT_FOLDERS = ["الوارد العام", "الصادر العام", "التعاميم", "العقود والاتفاقيات", "الشؤون المالية", "الموارد البشرية"]
 DEFAULT_TYPES = ["طلب", "شكوى", "استفسار", "تعميم", "دعوة", "تقرير", "عقد / اتفاقية", "إشعار"]
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -104,6 +107,11 @@ CREATE TABLE IF NOT EXISTS folders(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS ctypes(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS directives(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS corr_directives(
+  corr_id INTEGER NOT NULL REFERENCES correspondences(id), directive_id INTEGER NOT NULL REFERENCES directives(id),
+  PRIMARY KEY(corr_id, directive_id));
 CREATE TABLE IF NOT EXISTS reply_users(
   corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
   status TEXT NOT NULL DEFAULT 'pending', done_at TEXT, PRIMARY KEY(corr_id, user_id));
@@ -215,7 +223,7 @@ def init_db():
                          (k, label, color, cl, urg, i))
     conn.execute("INSERT OR IGNORE INTO corr_units(corr_id,dept_id) SELECT id, department_id FROM correspondences "
                  "WHERE department_id IS NOT NULL")  # ترحيل: الوحدة المفردة القديمة تصبح أول وحدة مسؤولة
-    for table, names in (("folders", DEFAULT_FOLDERS), ("ctypes", DEFAULT_TYPES)):
+    for table, names in (("folders", DEFAULT_FOLDERS), ("ctypes", DEFAULT_TYPES), ("directives", DEFAULT_DIRECTIVES)):
         if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0:
             for i, n in enumerate(names, 1):
                 conn.execute(f"INSERT INTO {table}(name,sort) VALUES(?,?)", (n, i))
@@ -691,6 +699,18 @@ def create_corr(ctx):
             if ru["clearance"] < conf:
                 raise ApiError(400, f"الموظف {ru['full_name']} لا يملك صلاحية لهذه الدرجة من السرية")
             reply_ids.append(rid)
+    # توجيهات الإسناد (للاطلاع، للدراسة والإفادة، … + «أخرى» نصية)
+    raw_dirs = b.get("directives") or []
+    if not isinstance(raw_dirs, list) or len(raw_dirs) > 30 or not all(isinstance(i, int) for i in raw_dirs):
+        raise ApiError(400, "قائمة التوجيهات غير صالحة")
+    dir_names = []
+    for did in dict.fromkeys(raw_dirs):
+        r = conn.execute("SELECT name FROM directives WHERE id=? AND active=1", (did,)).fetchone()
+        if not r:
+            raise ApiError(400, "توجيه غير موجود")
+        dir_names.append(r[0])
+    dir_other = f_text(b, "directive_other", 200)
+    instruction = "، ".join(dir_names + ([dir_other] if dir_other else [])) or "إسناد عند التسجيل"
     with tx(conn):
         if parent:
             pc = get_visible(ctx, parent)
@@ -716,13 +736,17 @@ def create_corr(ctx):
         conn.execute("INSERT INTO reads VALUES(?,?,?)", (cid, u["id"], now()))
         for d_id in units:
             conn.execute("INSERT INTO corr_units(corr_id,dept_id) VALUES(?,?)", (cid, d_id))
+        for did in dict.fromkeys(raw_dirs):
+            conn.execute("INSERT INTO corr_directives(corr_id,directive_id) VALUES(?,?)", (cid, did))
+        if dir_other:
+            conn.execute("UPDATE correspondences SET directive_other=? WHERE id=?", (dir_other, cid))
         for rid in reply_ids:
             conn.execute("INSERT INTO reply_users(corr_id,user_id) VALUES(?,?)", (cid, rid))
         if parent:
             mark_replied(ctx, parent, ref)
         for aid in assignees:
             conn.execute("INSERT INTO transfers(corr_id,from_user,to_user,instruction,due_date,created_at) VALUES(?,?,?,?,?,?)",
-                         (cid, u["id"], aid, "إسناد عند التسجيل", due, now()))
+                         (cid, u["id"], aid, instruction, due, now()))
         audit(ctx, "create", "correspondence", cid, ref)
     row = conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
     fire_webhooks("correspondence.created", hook_payload(row))
@@ -758,6 +782,8 @@ def get_corr(ctx):
         "SELECT DISTINCT u.full_name FROM transfers t JOIN users u ON u.id=t.to_user "
         "WHERE t.corr_id=? AND t.status='pending' ORDER BY t.id", (cid,))] or ([c["assignee_name"]] if c["assignee_name"] else [])
     c["can_reply"] = can_reply(ctx, c)
+    c["directives"] = [r[0] for r in conn.execute(
+        "SELECT d.name FROM corr_directives cd JOIN directives d ON d.id=cd.directive_id WHERE cd.corr_id=? ORDER BY d.sort, d.id", (cid,))]
     c["units"] = [r[0] for r in conn.execute(
         "SELECT d.name FROM corr_units cu JOIN departments d ON d.id=cu.dept_id WHERE cu.corr_id=? ORDER BY d.id", (cid,))]
     c["reply_users"] = [dict(r) for r in conn.execute(
@@ -1159,7 +1185,7 @@ def reports(ctx):
 
 
 # ───────────── المجلدات وأنواع المعاملات ─────────────
-@route("GET", r"/api/lookups/(?P<kind>folders|types)")
+@route("GET", r"/api/lookups/(?P<kind>folders|types|directives)")
 def lookups_list(ctx):
     t = LOOKUPS[ctx.params["kind"]]
     allr = ctx.user["role"] == "admin" and ctx.query.get("all") == "1"
@@ -1178,7 +1204,7 @@ def lookup_fields(b, creating):
     return out
 
 
-@route("POST", r"/api/lookups/(?P<kind>folders|types)", roles=("admin",))
+@route("POST", r"/api/lookups/(?P<kind>folders|types|directives)", roles=("admin",))
 def lookups_add(ctx):
     t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, True)
     mx = ctx.conn.execute(f"SELECT COALESCE(MAX(sort),0) FROM {t}").fetchone()[0]
@@ -1190,7 +1216,7 @@ def lookups_add(ctx):
     return 201, {"id": cur.lastrowid}
 
 
-@route("PUT", r"/api/lookups/(?P<kind>folders|types)/(?P<id>\d+)", roles=("admin",))
+@route("PUT", r"/api/lookups/(?P<kind>folders|types|directives)/(?P<id>\d+)", roles=("admin",))
 def lookups_edit(ctx):
     t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, False)
     if not f:

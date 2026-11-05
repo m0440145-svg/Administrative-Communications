@@ -335,6 +335,23 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(c["doc_date"], c["created_at"][:10])  # الافتراضي تاريخ التسجيل
         self.assertEqual(self.corr(self.tok["clerk1"], doc_date="2026-02-30")[0], 400)  # غير الصالح يُرفض
 
+    def test_09i_directives(self):
+        c1 = self.tok["clerk1"]
+        dirs = call("GET", "/api/lookups/directives", token=c1)[1]
+        names = [d["name"] for d in dirs]
+        for n in ("لإكمال اللازم", "للاطلاع", "للرد", "للمفاهمة حضوريًا", "للمفاهمة هاتفيًا", "لكتابة خطاب", "تأكيد استلام"):
+            self.assertIn(n, names)
+        ids = [d["id"] for d in dirs if d["name"] in ("للاطلاع", "للدراسة والإفادة")]
+        s, d, _ = self.corr(c1, assigned_to=[self.uid["emp1"]], directives=ids, directive_other="مع الأخذ بالملاحظات", subject="توجيهات")
+        self.assertEqual(s, 201)
+        det = call("GET", f"/api/correspondences/{d['id']}", token=c1)[1]
+        self.assertEqual(sorted(det["directives"]), sorted(["للاطلاع", "للدراسة والإفادة"]))
+        self.assertEqual(det["directive_other"], "مع الأخذ بالملاحظات")
+        task = [t for t in call("GET", "/api/tasks", token=self.tok["emp1"])[1] if t["id"] == d["id"]][0]
+        self.assertIn("للاطلاع", task["instruction"]); self.assertIn("مع الأخذ بالملاحظات", task["instruction"])
+        self.assertEqual(self.corr(c1, directives=[99999])[0], 400)
+        self.assertEqual(call("POST", "/api/lookups/directives", {"name": "توجيه جديد"}, self.admin)[0], 201)
+
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
         self.assertGreater(d["total"], 0)

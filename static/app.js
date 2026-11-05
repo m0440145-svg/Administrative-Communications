@@ -16,7 +16,7 @@ const L = {
     apikey_revoke: "إلغاء مفتاح API", webhook_create: "إنشاء Webhook", webhook_delete: "حذف Webhook", integrity_failure: "فشل سلامة ملف" },
 };
 
-const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {}, folders: [], types: [] };
+const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {}, folders: [], types: [], directives: [] };
 
 // ───────── أدوات ─────────
 function h(tag, attrs, ...kids) {
@@ -422,6 +422,12 @@ function newView(q) {
   const replyPicker = peoplePicker(everyone, "إن لم تضف أحدًا فيحق الرد لكل من يطّلع على المراسلة.");
   const assignPicker = peoplePicker(everyone.filter((u) => u.id !== state.user.id), "يمكنك إسناد المراسلة لأكثر من موظف.");
   const replyBox = replyPicker.node;
+  // قائمة توجيهات الإسناد (مربعات اختيار على عمودين كالقسيمة الورقية) + «أخرى» بنص حر
+  const otherCb = h("input", { type: "checkbox", name: "dir_other_cb", onchange: () => { otherTxt.disabled = !otherCb.checked; if (otherCb.checked) otherTxt.focus(); } });
+  const otherTxt = h("input", { type: "text", name: "directive_other", maxlength: 200, disabled: true, placeholder: "اكتب التوجيه…", "aria-label": "توجيه آخر", class: "dir-other" });
+  const dirBox = h("div", { class: "dirgrid", role: "group", "aria-label": "توجيه الإسناد" },
+    state.directives.map((d) => h("label", { class: "opt" }, h("input", { type: "checkbox", name: "directive", value: d.id }), d.name)),
+    h("label", { class: "opt other" }, otherCb, "أخرى"), otherTxt);
   // الوحدات المسؤولة: واحدة أو أكثر، وتبدأ بوحدة المسجِّل
   const unitItems = activeDepts().map((d) => ({ id: d.id, full_name: d.name }));
   const unitPicker = peoplePicker(unitItems, "يمكنك اختيار أكثر من وحدة مسؤولة؛ الأولى هي الأساسية.", "ابحث عن وحدة…",
@@ -435,6 +441,9 @@ function newView(q) {
     if (body.needs_reply) body.reply_users = replyPicker.ids();
     if (assignPicker.ids().length) body.assigned_to = assignPicker.ids();
     if (unitPicker.ids().length) body.department_id = unitPicker.ids();
+    const dirs = [...form.querySelectorAll("input[name=directive]:checked")].map((x) => Number(x.value));
+    if (dirs.length) body.directives = dirs;
+    if (otherCb.checked && otherTxt.value.trim()) body.directive_other = otherTxt.value.trim();
     for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id",
       "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
@@ -466,6 +475,7 @@ function newView(q) {
     replyRow,
     row("الوحدة المسؤولة", unitPicker.node),
     row("إسناد إلى", assignPicker.node),
+    row(h("span", {}, "توجيه الإسناد"), dirBox),
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
@@ -542,7 +552,8 @@ async function detailView(id) {
       m("الجهة", c.party), m("رقم مرجع الجهة", c.party_ref || "—"),
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
       m("الاستحقاق", c.due_date || "—"), m(c.units.length > 1 ? "الوحدات المسؤولة" : "الوحدة المسؤولة", c.units.length ? c.units.join("، ") : c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
-      m("المُسنَد إليهم", c.assignees.length ? c.assignees.join("، ") : "—"), m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
+      m("المُسنَد إليهم", c.assignees.length ? c.assignees.join("، ") : "—"),
+      c.directives.length || c.directive_other ? m("توجيه الإسناد", [...c.directives, c.directive_other].filter(Boolean).join("، ")) : null, m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
       m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
       c.deliverer_name ? m(c.direction === "incoming" ? "مسلّم المراسلة" : "مستلم المراسلة", c.deliverer_name) : null,
       c.deliverer_phone ? m("رقم الجوال", h("span", { class: "ltr" }, c.deliverer_phone)) : null,
@@ -609,8 +620,8 @@ async function integrationView() {
 
 // ───────── التوجيه ─────────
 async function loadRefs() {
-  [state.depts, state.users, state.cls, state.folders, state.types] = await Promise.all([
-    api("/departments"), api("/users"), api("/classifications"), api("/lookups/folders"), api("/lookups/types")]);
+  [state.depts, state.users, state.cls, state.folders, state.types, state.directives] = await Promise.all([
+    api("/departments"), api("/users"), api("/classifications"), api("/lookups/folders"), api("/lookups/types"), api("/lookups/directives")]);
   state.clsMap = Object.fromEntries(state.cls.map((c) => [c.key, c]));
   // الأولويات المعطّلة تبقى معروضة للمراسلات القديمة
   if (state.user.role === "admin") {
