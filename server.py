@@ -172,13 +172,14 @@ def init_db():
             conn.execute("INSERT INTO departments(name) VALUES(?)", (d,))
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         pw = os.environ.get("ACP_ADMIN_PASSWORD") or secrets.token_urlsafe(9) + "7a"
+        admin_user = os.environ.get("ACP_ADMIN_USER", "admin")
         conn.execute(
             "INSERT INTO users(username,full_name,password_hash,role,department_id,clearance,must_change,created_at)"
-            " VALUES('admin','مدير النظام',?, 'admin',1,2,?,?)",
-            (hash_password(pw), 0 if os.environ.get("ACP_ADMIN_PASSWORD") else 1, now()))
+            " VALUES(?,'مدير النظام',?, 'admin',1,2,?,?)",
+            (admin_user, hash_password(pw), 0 if os.environ.get("ACP_ADMIN_PASSWORD") else 1, now()))
         print("=" * 60)
         print(" تم إنشاء حساب المدير لأول مرة:")
-        print("   اسم المستخدم : admin")
+        print(f"   اسم المستخدم : {admin_user}")
         if not os.environ.get("ACP_ADMIN_PASSWORD"):
             print(f"   كلمة المرور  : {pw}   (سيُطلب تغييرها عند أول دخول)")
         else:
