@@ -134,7 +134,7 @@ function shell(content, taskCount) {
   const role = state.user.role, leader = ["admin", "manager"].includes(role), reports = isStaff() || can("export");
   const GROUPS = [
     { id: "home", title: "🏠 الرئيسية", items: [["#/dashboard", "لوحة التحكم"], ["#/tasks", "مهامي"], ...(leader ? EXEC_NAV : [])] },
-    { id: "mail", title: "✉️ المراسلات", items: [["#/new", "تسجيل مراسلة جديدة"], ["#/list?direction=incoming", "الوارد"], ["#/list?direction=outgoing", "الصادر"], ["#/list", "المعاملات"], ["#/search", "بحث متقدم"], ...(isStaff() ? [["#/scan", "المسح والاستلام"]] : [])] },
+    { id: "mail", title: "✉️ المراسلات", items: [["#/new", "تسجيل مراسلة جديدة"], ["#/list?direction=incoming", "الوارد"], ["#/list?direction=outgoing", "الصادر"], ["#/list", "المعاملات"], ["#/browse", "الفهارس"], ["#/calendar", "التقويم"], ["#/search", "بحث متقدم"], ...(isStaff() ? [["#/scan", "المسح والاستلام"]] : [])] },
     { id: "follow", title: "📊 المتابعة والتقارير", items: [["#/notifications", "الإشعارات"], ["#/delegation", "التفويض"], ...(reports ? REPORT_NAV : [])] },
     ...(role === "admin" ? [
       { id: "adm1", title: "🏢 الهيكل والصلاحيات", items: [["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/perms", "الصلاحيات"], ["#/admin/security", "سياسات الأمان"]] },
@@ -263,7 +263,7 @@ function corrTable(items, compact) {
 
 
 async function listView(q) {
-  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size", "folder", "type", "reply", "by", "dir"];
+  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size", "folder", "type", "reply", "by", "dir", "tag"];
   const params = new URLSearchParams();
   filters.forEach((k) => q.get(k) && params.set(k, q.get(k)));
   const page = Number(q.get("page") || 1);
@@ -325,7 +325,7 @@ async function listView(q) {
     bar.hidden = sel$.size === 0;
     bar.replaceChildren(h("span", {}, `المحدد: ${sel$.size}`), h("button", { type: "button", class: "btn sm", onclick: async () => {
       try { await api("/correspondences/read", { method: "POST", body: { ids: [...sel$] } }); toast("تم التعليم كمقروء"); render(); } catch (e) { toast(e.message, true); }
-    } }, "تعليم كمقروء"));
+    } }, "تعليم كمقروء"), ...(typeof bulkExtra === "function" ? bulkExtra([...sel$], render) : []));
     all.checked = sel$.size === data.items.length && data.items.length > 0;
     checks.forEach(([id, el]) => { el.checked = sel$.has(id); el.closest("tr").classList.toggle("sel", el.checked); });
   };

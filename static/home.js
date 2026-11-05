@@ -102,8 +102,10 @@
     // لوحة التحكم القائمة كما هي (دون عنوانها المكرر) تحت قسم «تفاصيل الإحصاءات»
     const rest = Array.isArray(details) ? details.slice(1) : [details];
 
+    let saved = null;
+    try { saved = window.savedViewsCard ? await savedViewsCard() : null; } catch { /* اختياري */ }
     return [head, quickRow, alertBox,
       h("div", { class: "grid g2" }, section("بانتظار إجرائي", taskList, h("a", { href: "#/tasks", class: "small" }, "عرض الكل")), section("آخر النشاط", activity, h("a", { href: "#/notifications", class: "small" }, "كل الإشعارات"))),
-      kpiRow, securityCard, h("h3", { class: "home-sub" }, "تفاصيل الإحصاءات"), ...rest];
+      saved, kpiRow, securityCard, h("h3", { class: "home-sub" }, "تفاصيل الإحصاءات"), ...rest];
   };
 })();
