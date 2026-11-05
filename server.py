@@ -220,6 +220,8 @@ EXT_NOTIFY = []    # fn(conn, user_id, kind, title, body, corr_id) بعد إدر
 EXT_TICK = []      # fn(conn) مهام دورية (تصعيد SLA، كشف الانحراف، تقارير مجدولة)
 EXT_START = []     # fn() خلفيات تبدأ مع الخادم
 EXT_CLI = {}       # أوامر سطر الأوامر: python server.py <name> ...
+EXT_GATE = []      # fn(handler, conn, path) تُستدعى قبل المصادقة؛ ترفع ApiError لرفض الطلب (حدّ المعدّل، خمول الجلسة)
+EXT_AUDIT = []     # fn(record: dict) بعد كل تسجيل في سجل الإجراءات (تصدير Syslog)
 EXT_HANDLERS = {}  # أحداث: اسم -> [fn(ctx, **kw)]
 FILE_CODEC = {"enc": None, "dec": None}  # تشفير المرفقات عند الراحة (اختياري)
 MIGRATIONS = {
@@ -276,6 +278,13 @@ def audit(ctx, action, entity=None, entity_id=None, detail=None):
         if own:
             conn.execute("ROLLBACK")
         raise
+    if EXT_AUDIT:
+        rec = {"action": action, "username": who, "ip": ctx.ip, "entity": entity, "entity_id": entity_id, "detail": detail, "hash": h}
+        for fn in EXT_AUDIT:
+            try:
+                fn(rec)
+            except Exception:
+                pass
 
 
 def init_db():
@@ -621,6 +630,9 @@ def change_password(ctx):
     check_password_policy(b.get("new"))
     ctx.conn.execute("UPDATE users SET password_hash=?, must_change=0 WHERE id=?",
                      (hash_password(b["new"]), ctx.user["id"]))
+    # إبطال بقية الجلسات (سرقة رمز سابق لا تبقى صالحة بعد تغيير كلمة المرور) مع إبقاء الجلسة الحالية
+    cur = sha((ctx.h.headers.get("Authorization") or "")[7:])
+    ctx.conn.execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (ctx.user["id"], cur))
     audit(ctx, "password_changed", "user", ctx.user["id"])
     return 200, {"ok": True}
 
@@ -1660,6 +1672,8 @@ class Handler(BaseHTTPRequestHandler):
                 m = rx.fullmatch(path)
                 if not m or method != self.command:
                     continue
+                for gate in EXT_GATE:
+                    gate(self, conn, path)
                 user = self.authenticate(conn) if (auth or self.headers.get("Authorization")) else None
                 if auth and not user:
                     return self.send_json(401, {"error": "يلزم تسجيل الدخول"})
@@ -1700,7 +1714,7 @@ def load_extensions():
     """تحميل الوحدات الملحقة (كل وحدة تضيف جداولها ومساراتها دون المساس بالنواة)."""
     import importlib
     me = sys.modules[__name__]
-    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec", "ext_brand"):
+    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec", "ext_brand", "ext_harden"):
         importlib.import_module(name).install(me)
 
 

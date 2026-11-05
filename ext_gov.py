@@ -96,6 +96,8 @@ def install(S):
             checked += 1
         return {"checked": checked, "legacy_unverified": legacy, "ok": bad is None, "first_bad_id": bad}
 
+    S.verify_chain = verify_chain
+
     @route("GET", r"/api/admin/audit/verify", roles=("admin",))
     def audit_verify(ctx):
         res = verify_chain(ctx.conn)
