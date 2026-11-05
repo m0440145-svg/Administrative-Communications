@@ -381,6 +381,13 @@ def install(S):
                         if os.path.isfile(fp):
                             z.write(fp, f"uploads/{n}")
                             manifest["files"][f"uploads/{n}"] = sha_file(fp)
+                bd = os.path.join(data_dir, "branding")  # الشعار ضمن النسخة الاحتياطية
+                if os.path.isdir(bd):
+                    for n in sorted(os.listdir(bd)):
+                        fp = os.path.join(bd, n)
+                        if os.path.isfile(fp):
+                            z.write(fp, f"branding/{n}")
+                            manifest["files"][f"branding/{n}"] = sha_file(fp)
                 cd = os.path.join(data_dir, "cold")
                 if os.path.isdir(cd):
                     for n in sorted(os.listdir(cd)):
@@ -436,6 +443,10 @@ def install(S):
                         if os.path.exists(db + ext):
                             os.remove(db + ext)
                 shutil.move(os.path.join(tmp, "acp.db"), db)
+                if os.path.isdir(os.path.join(tmp, "branding")):
+                    os.makedirs(os.path.join(data_dir, "branding"), exist_ok=True)
+                    for n in os.listdir(os.path.join(tmp, "branding")):
+                        shutil.move(os.path.join(tmp, "branding", n), os.path.join(data_dir, "branding", n))
                 cdir = os.path.join(data_dir, "cold")
                 os.makedirs(cdir, exist_ok=True)
                 if os.path.isdir(os.path.join(tmp, "cold")):

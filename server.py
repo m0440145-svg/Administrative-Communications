@@ -1700,7 +1700,7 @@ def load_extensions():
     """تحميل الوحدات الملحقة (كل وحدة تضيف جداولها ومساراتها دون المساس بالنواة)."""
     import importlib
     me = sys.modules[__name__]
-    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec"):
+    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec", "ext_brand"):
         importlib.import_module(name).install(me)
 
 

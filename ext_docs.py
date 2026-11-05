@@ -532,7 +532,9 @@ def install(S):
             s["on_behalf_of"] = (ctx.conn.execute("SELECT full_name FROM users WHERE id=?", (snap["on_behalf_of"],)).fetchone() or [None])[0] if snap.get("on_behalf_of") else None
         parent = ctx.conn.execute("SELECT ref_no, subject, doc_date FROM correspondences WHERE id=?", (c["parent_id"],)).fetchone() if c["parent_id"] else None
         audit(ctx, "letter_print", "correspondence", cid, c["ref_no"])
+        contact = " • ".join(x for x in (st.get("org_address"), st.get("org_phone"), st.get("org_email"), st.get("org_website")) if x)
         return 200, {"org_name": st["org_name"], "org_header": st["org_header"], "org_footer": st["org_footer"], "org_stamp": st["org_stamp"],
+                     "org_contact": contact, "has_logo": bool(st.get("org_logo_type")), "logo_v": st.get("org_logo_v", ""),
                      "ref_no": c["ref_no"], "doc_date": c["doc_date"], "party": c["party"], "subject": c["subject"], "body": c["summary"] or "",
                      "direction": c["direction"], "ref_to": dict(parent) if parent else None, "signatures": sigs, "qr_svg": qr_svg(f"ACP|{c['ref_no']}|{c['doc_date']}|0", 3)}
 

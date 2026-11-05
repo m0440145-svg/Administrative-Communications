@@ -184,7 +184,7 @@ EXT_PREFIX["/letter/"] = async (id) => {
   return [h("div", { class: "row noprint" }, h("h2", {}, "الخطاب الرسمي"), h("a", { class: "btn ghost sm", href: "#/c/" + id }, "← المراسلة"),
     h("button", { class: "btn", onclick: () => window.print() }, "🖨 طباعة / حفظ PDF"), h("span", { class: "small muted" }, "الترويسة والتذييل من «الهوية والترويسة» في إعدادات النظام")),
     h("div", { class: "letter" },
-      h("div", { class: "lt-head" }, h("div", {}, h("div", { class: "lt-org" }, l.org_name || "اسم الجهة"), l.org_header ? h("div", { class: "small" }, l.org_header) : null),
+      h("div", { class: "lt-head" }, l.has_logo ? h("img", { class: "lt-logo", src: "/api/public/logo?v=" + encodeURIComponent(l.logo_v || ""), alt: "" }) : null, h("div", {}, h("div", { class: "lt-org" }, l.org_name || "اسم الجهة"), l.org_header ? h("div", { class: "small" }, l.org_header) : null),
         h("div", { class: "lt-meta" }, h("div", {}, "الرقم: ", h("span", { class: "ltr" }, l.ref_no)), h("div", {}, "التاريخ: " + l.doc_date), l.ref_to ? h("div", {}, "إشارة إلى: ", h("span", { class: "ltr" }, l.ref_to.ref_no)) : null)),
       h("div", { class: "lt-to" }, "السيد/ ", h("strong", {}, l.party), " المحترم"),
       h("div", { class: "lt-subj" }, "الموضوع: ", l.subject),
@@ -192,7 +192,7 @@ EXT_PREFIX["/letter/"] = async (id) => {
       h("div", { class: "lt-sign" }, l.signatures.length ? l.signatures.map((s) => h("div", { class: "lt-sig" }, h("div", {}, "✓ اعتُمد إلكترونيًا"), h("strong", {}, s.full_name), s.job_title ? h("div", { class: "small" }, s.job_title) : null,
         s.on_behalf_of ? h("div", { class: "small" }, "بتفويض عن: " + s.on_behalf_of) : null, h("div", { class: "small muted" }, s.signed_at.slice(0, 16)))) : h("div", { class: "muted small" }, "(لم يُعتمد بعد)"),
         l.org_stamp ? h("div", { class: "lt-stamp" }, l.org_stamp) : null, svgNode(l.qr_svg)),
-      l.org_footer ? h("div", { class: "lt-foot" }, l.org_footer) : null)];
+      l.org_footer || l.org_contact ? h("div", { class: "lt-foot" }, l.org_footer, l.org_footer && l.org_contact ? h("br") : null, l.org_contact) : null)];
 };
 
 // ───────────── واجهة القيادة: اعتماد سريع + مؤشرات ─────────────

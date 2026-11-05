@@ -143,7 +143,7 @@ function shell(content, taskCount) {
       { id: "adm3", title: "⚙️ التشغيل والحوكمة", items: [["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/branding", "الهوية والترويسة"],
         ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]] },
     ] : []),
-    { id: "me", title: "👤 حسابي", items: [["#/security", "الأمان والتفضيلات"]] },
+    { id: "me", title: "👤 حسابي", items: [["#/about", "من نحن"], ["#/security", "الأمان والتفضيلات"]] },
   ];
   let navState = {};
   try { navState = JSON.parse(localStorage.getItem("acp_nav") || "{}"); } catch { /* */ }
@@ -166,7 +166,7 @@ function shell(content, taskCount) {
     try { await api("/me/prefs", { method: "PUT", body: { theme: e.target.value, page_size: (state.prefs || {}).page_size || 20 } }); state.prefs.theme = e.target.value; } catch { /* */ } } });
   return h("div", { class: "shell" },
     h("nav", { class: "side", "aria-label": "القائمة الرئيسية" },
-      h("h1", {}, "منصة الاتصالات الإدارية"), scanBox(), items, saved,
+      h("h1", {}, brandLogo("side-logo"), BRAND.name || "منصة الاتصالات الإدارية"), scanBox(), items, saved,
       h("div", { class: "who" }, h("div", {}, state.user.full_name), h("div", { class: "small" }, L.role[state.user.role]),
         h("label", { class: "small themelb" }, "السمة ", themeSel),
         h("button", { class: "btn ghost sm", onclick: doLogout }, "تسجيل الخروج"))),
@@ -195,7 +195,7 @@ function loginView() {
     h("div", { class: "field" }, h("label", { for: "u" }, "اسم المستخدم"), h("input", { id: "u", name: "u", autocomplete: "username", required: true, autofocus: true })),
     h("div", { class: "field" }, h("label", { for: "p" }, "كلمة المرور"), h("input", { id: "p", name: "p", type: "password", autocomplete: "current-password", required: true })),
     err, h("button", { class: "btn", style: null }, "دخول"));
-  return h("div", { class: "login" }, h("h1", {}, "منصة الاتصالات الإدارية"), form);
+  return h("div", { class: "login" }, brandLogo("login-logo"), h("h1", {}, BRAND.name || "منصة الاتصالات الإدارية"), BRAND.login_message ? h("p", { class: "muted" }, BRAND.login_message) : null, form);
 }
 
 function changePasswordView(forced) {
