@@ -50,6 +50,9 @@ async function startRealtime() {
           if (block.includes("event: notification")) {
             const line = block.split("\n").find((l) => l.startsWith("data: "));
             try { const ev = JSON.parse(line.slice(6)); toast("🔔 " + ev.title); pollNotifications(); if (location.hash.startsWith("#/notifications") || location.hash === "#/tasks") render(); } catch { /* */ }
+          } else if (block.includes("event: chat")) {  // رسالة دردشة جديدة في معاملة (ext_chat)
+            const line = block.split("\n").find((l) => l.startsWith("data: "));
+            try { if (window.onChatEvent) window.onChatEvent(JSON.parse(line.slice(6))); } catch { /* */ }
           }
         }
       }

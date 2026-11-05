@@ -395,3 +395,13 @@ a.facet:hover{border-color:var(--brand-2);box-shadow:0 4px 14px #0001;text-decor
 
 /* إصدارات المرفقات */
 .vdlg{width:min(940px,96vw)}.vup{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}.vup input[type=file]{max-width:260px}
+
+/* دردشة المعاملة */
+.chat{display:flex;flex-direction:column;gap:8px}.chat-list{max-height:380px;min-height:120px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:6px;background:var(--bg);border:1px solid var(--line);border-radius:12px}
+.cm{max-width:82%;padding:8px 12px;border-radius:14px;background:var(--panel);border:1px solid var(--line);align-self:flex-start;overflow-wrap:anywhere}
+.cm.mine{align-self:flex-end;background:var(--brand-soft);border-color:var(--brand-2)}.cm .cm-h{font-size:12px;color:var(--muted);margin-bottom:2px;display:flex;gap:8px;align-items:center}
+.cm .cm-b{white-space:pre-wrap;line-height:1.7}.cm.del .cm-b{color:var(--muted);font-style:italic}.cm .mention{color:var(--brand);font-weight:700}
+.cm .cm-x{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:12px;padding:0 4px}.cm .cm-x:hover{color:var(--danger)}
+.chat-form{display:flex;gap:8px;align-items:flex-end}.chat-form textarea{flex:1;min-height:44px;max-height:140px;resize:vertical}
+.chat-live{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}.chat-live::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--muted)}.chat-live.on::before{background:var(--ok)}
+.chat-new{position:sticky;bottom:0;align-self:center;background:var(--brand-2);color:#fff;border:0;border-radius:999px;padding:4px 14px;cursor:pointer;font-size:12px}

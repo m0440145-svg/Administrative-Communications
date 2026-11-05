@@ -210,6 +210,9 @@ def install(S):
                 except queue.Full:
                     pass
 
+    S.publish = publish
+    S.connected_users = lambda: [u for u, qs in list(subs.items()) if qs]
+
     @route("GET", r"/api/events")
     def events(ctx):
         uid = ctx.user["id"]
@@ -226,7 +229,9 @@ def install(S):
                 while True:
                     try:
                         ev = q.get(timeout=15)
-                        yield f"event: notification\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode()
+                        name = ev.get("_event", "notification") if isinstance(ev, dict) else "notification"
+                        payload = {k: v for k, v in ev.items() if k != "_event"} if isinstance(ev, dict) else ev
+                        yield f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
                     except queue.Empty:
                         yield b": ping\n\n"
             finally:
