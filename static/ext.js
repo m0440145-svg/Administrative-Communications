@@ -139,7 +139,7 @@ async function detailExtras(c) {
       pill(wf.status === "done" ? "closed" : wf.status === "active" ? "in_progress" : "archived", { active: "جارٍ", done: "مكتمل", rejected: "مرفوض", cancelled: "ملغى" }[wf.status]),
       wf.status === "active" && c.can_manage ? h("button", { class: "btn ghost sm", onclick: guardX(async () => { if (confirm("إلغاء مسار العمل الجاري؟")) { await api(`/correspondences/${c.id}/workflow`, { method: "DELETE" }); render(); } }) }, "إلغاء المسار") : null),
       h("ol", { class: "wfsteps" }, wf.steps.map((st) => h("li", { class: "wfs " + st.status },
-        h("div", { class: "row" }, h("strong", {}, `${st.idx + 1}. ${st.name}`), h("span", { class: "small muted" }, `(${SIMPLE_KINDS[st.kind]} — ${st.user_name})`),
+        h("div", { class: "row" }, h("strong", {}, `${st.idx + 1}. ${st.name}`), h("span", { class: "pill" }, `مرحلة ${st.stage + 1}`), h("span", { class: "small muted" }, `(${SIMPLE_KINDS[st.kind]} — ${st.user_name})`),
           h("span", { class: "pill " + ({ done: "closed", pending: "in_progress", rejected: "urgent" }[st.status] || "archived") }, STEP_STATUS[st.status])),
         st.due_date && st.status === "pending" ? h("div", { class: "small muted" }, "الاستحقاق: " + st.due_date) : null,
         st.comment ? h("div", { class: "small" }, "التعليق: " + st.comment) : null, st.can_decide ? act(st) : null)))));
@@ -177,6 +177,7 @@ async function detailExtras(c) {
           render();
         }) }, c.legal_hold ? "رفع التجميد" : "تجميد قانوني") : null)));
   }
+  if (typeof detailExtras2 === "function") cards.push(...(await detailExtras2(c)));  // ملف موحّد/ملاحظات/روابط/بريد (ext2.js)
   return cards;
 }
 
@@ -230,14 +231,20 @@ async function workflowsView() {
     const kind = sel("kind", SIMPLE_KINDS, s.kind || "review", { "aria-label": "النوع" });
     const who = sel("who", { ...Object.fromEntries(Object.entries(ROLE_PICK).map(([k, v]) => ["role:" + k, "دور: " + v])), ...Object.fromEntries(Object.entries(people).map(([k, v]) => ["user:" + k, "موظف: " + v])) }, "role:manager", { "aria-label": "المسؤول" });
     const days = h("input", { type: "number", min: 1, max: 60, value: s.days || 3, class: "narrow", "aria-label": "المهلة بالأيام" });
-    const row = h("div", { class: "row steprow" }, name, kind, who, h("label", { class: "inl" }, "أيام", days), h("button", { type: "button", class: "btn ghost sm", onclick: () => row.remove() }, "حذف"));
-    row.read = () => { const [t, v] = who.value.split(":"); return { name: name.value, kind: kind.value, days: Number(days.value), ...(t === "role" ? { role: v } : { user_id: Number(v) }) }; };
+    const stage = h("input", { type: "number", min: 1, max: 10, value: s.stage || "", placeholder: "تسلسل", class: "narrow", title: "نفس رقم المرحلة = تنفيذ متوازٍ؛ فارغ = يتبع السابقة", "aria-label": "رقم المرحلة" });
+    const cond = sel("cond", { "": "دائمًا", urgent: "للعاجل فقط", external: "للخارجي فقط", outgoing: "للصادر فقط" }, s.when && s.when.priority_in ? "urgent" : s.when && s.when.scope ? "external" : s.when && s.when.direction ? "outgoing" : "", { "aria-label": "شرط الخطوة" });
+    const row = h("div", { class: "row steprow" }, name, kind, who, h("label", { class: "inl" }, "مرحلة", stage), cond, h("label", { class: "inl" }, "أيام", days), h("button", { type: "button", class: "btn ghost sm", onclick: () => row.remove() }, "حذف"));
+    row.read = () => {
+      const [t, v] = who.value.split(":");
+      const when = cond.value === "urgent" ? { priority_in: ["urgent", "very_urgent"] } : cond.value === "external" ? { scope: "external" } : cond.value === "outgoing" ? { direction: "outgoing" } : null;
+      return { name: name.value, kind: kind.value, days: Number(days.value), ...(stage.value ? { stage: Number(stage.value) } : {}), ...(when ? { when } : {}), ...(t === "role" ? { role: v } : { user_id: Number(v) }) };
+    };
     stepsBox.append(row);
   };
   addStep({ name: "مراجعة", kind: "review" }); addStep({ name: "اعتماد", kind: "approve" });
   const nm = h("input", { placeholder: "اسم المسار", maxlength: 80, "aria-label": "اسم المسار" }), ds = h("input", { placeholder: "وصف مختصر", maxlength: 300, "aria-label": "الوصف" });
   const close = h("input", { type: "checkbox" });
-  return [adminHead("workflows", "مسارات العمل", "تعريف تسلسل الخطوات (مراجعة / اعتماد) وكل خطوة لدور أو موظف معيّن ومهلة بالأيام. تُطبَّق على أي مراسلة من صفحة تفاصيلها، ويُرسل إشعار لصاحب كل خطوة. خطوة «اعتماد» تتطلب كلمة المرور وتُنتج توقيعًا إلكترونيًا."),
+  return [adminHead("workflows", "مسارات العمل", "تعريف الخطوات (مراجعة / اعتماد) لكل منها دور أو موظف ومهلة بالأيام. الخطوات ذات «المرحلة» نفسها تعمل بالتوازي (كإحالة لإدارتين معًا) ولا تنتقل المعاملة للمرحلة التالية إلا باكتمالها؛ و«الشرط» يستبعد الخطوة تلقائيًا إن لم تنطبق على المراسلة (إحالة شرطية). تُطبَّق على أي مراسلة من صفحة تفاصيلها، ويُرسل إشعار لصاحب كل خطوة. خطوة «اعتماد» تتطلب كلمة المرور وتُنتج توقيعًا إلكترونيًا."),
     h("div", { class: "card" }, h("h3", {}, "مسار جديد"), h("div", { class: "row" }, nm, ds, h("label", { class: "opt" }, close, "يُغلق الخطاب عند اكتمال المسار")), stepsBox,
       h("div", { class: "row" }, h("button", { type: "button", class: "btn ghost sm", onclick: () => addStep() }, "+ خطوة"),
         h("button", { class: "btn", onclick: guardX(async () => { await api("/workflows", { method: "POST", body: { name: nm.value, description: ds.value, close_on_finish: close.checked, steps: [...stepsBox.children].map((r) => r.read()) } }); toast("حُفظ المسار"); render(); }) }, "حفظ المسار"))),
@@ -329,7 +336,7 @@ async function retentionView() {
         h("td", {}, (state.types.find((t) => t.id === p.type_id) || {}).name || "الكل"), h("td", {}, p.active ? "✔" : "—"),
         h("td", { class: "row" }, h("button", { class: "btn ghost sm", onclick: guardX(async () => { await api("/admin/retention/" + p.id, { method: "PUT", body: { active: !p.active } }); render(); }) }, p.active ? "تعطيل" : "تفعيل"),
           h("button", { class: "btn danger sm", onclick: guardX(async () => { if (confirm("حذف السياسة؟")) { await api("/admin/retention/" + p.id, { method: "DELETE" }); render(); } }) }, "حذف")))))) ) : null,
-    candTable("archive", "مؤهّلة للأرشفة"), candTable("dispose", "مؤهّلة للإتلاف"),
+    candTable("archive", "مؤهّلة للأرشفة"), candTable("dispose", "مؤهّلة للإتلاف"), await committeeCards(),
     h("div", { class: "card" }, h("h3", {}, "سجل الإتلاف"), log.length ? h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الرقم", "الموضوع", "بواسطة", "التاريخ", "السبب", "الملفات (بصماتها)"].map((t) => h("th", {}, t)))),
       h("tbody", {}, log.map((l) => h("tr", {}, h("td", { class: "ltr" }, l.ref_no), h("td", {}, l.subject), h("td", {}, l.by_name), h("td", { class: "small ltr" }, fmtDT(l.disposed_at)), h("td", {}, l.reason),
         h("td", { class: "small" }, JSON.parse(l.attachments).map((a) => `${a.filename} (${a.sha256.slice(0, 10)}…)`).join("، ") || "—")))))) : h("div", { class: "muted" }, "لا عمليات إتلاف"))];

@@ -3,7 +3,7 @@
 // كل النصوص تُدرج عبر textContent لمنع هجمات XSS.
 
 const L = {
-  status: { new: "جديد", in_progress: "جارٍ", referred: "محال", closed: "منجز", archived: "مؤرشف" },
+  status: { draft: "مسودة", new: "جديد", in_progress: "جارٍ", under_review: "قيد المراجعة", awaiting_signature: "بانتظار التوقيع", referred: "محال", closed: "منجز", archived: "مؤرشف" },
   priority: {}, // تُحمَّل من الخادم (تصنيفات الوثيقة) في loadRefs
   conf: ["عادي", "سري", "سري للغاية"],
   role: { admin: "مدير النظام", manager: "مدير إدارة", clerk: "مكتب الصادر والوارد", employee: "موظف" },
@@ -74,6 +74,13 @@ const can = (p) => state.user.role === "admin" || (state.user.perms || []).inclu
 const folderOptions = () => Object.fromEntries(state.folders.map((f) => [f.id, "\u00a0\u00a0".repeat(f.depth || 0) + (f.depth ? "↳ " : "") + f.name])); // شجرة المجلدات
 const activeDepts = () => state.depts.filter((d) => d.active);
 const deptOptions = () => Object.fromEntries(activeDepts().map((d) => [d.id, d.name]));
+// حالة SLA (مهلة التصنيف بساعات العمل): سليم / يقترب (75٪) / متجاوز → يُلوَّن الصف بالأحمر
+function slaBadge(c) {
+  if (!c.sla_state) return "—";
+  const due = (c.sla_due_at || "").slice(0, 16).replace("T", " ");
+  return h("span", { class: "sla " + c.sla_state, title: "الموعد: " + due }, { ok: "✔ ضمن المهلة", warn: "⚠ يقترب", breach: "⛔ متجاوز" }[c.sla_state], h("div", { class: "small muted ltr" }, due.slice(5)));
+}
+
 // حالة الرد: للوارد الذي يحتاج رد → «بانتظار الرد» أو «تم الرد»؛ وللصادر المرتبط بوارد → «رد على…»
 function replyBadge(c) {
   if (c.reply_count > 0) return pill("closed", `✔ تم الرد (${c.reply_count})`);
@@ -106,10 +113,12 @@ const NAV = [
   ["#/search", "بحث متقدم"],
   ["#/notifications", "الإشعارات"],
   ["#/delegation", "التفويض"],
+  ["#/security", "الأمان والتفضيلات"],
 ];
+const EXEC_NAV = [["#/executive", "واجهة القيادة"]];
 const REPORT_NAV = [["#/reports", "التقارير والمؤشرات"]];
 const ADMIN_NAV = [["sep", "إعدادات النظام"], ["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/classes", "التصنيفات والخصوصية"],
-  ["#/admin/workflows", "مسارات العمل"], ["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"],
+  ["#/admin/workflows", "مسارات العمل"], ["#/admin/sla", "اتفاقيات الخدمة SLA"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/security", "سياسات الأمان"], ["#/admin/branding", "الهوية والترويسة"], ["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"],
   ["#/admin/perms", "الصلاحيات"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]];
 
 const THEMES = { auto: "تلقائي", light: "فاتح", dark: "داكن" };
@@ -121,7 +130,7 @@ function applyTheme(t) {
 
 function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
-  const items = [...NAV, ...(isStaff() || can("export") ? REPORT_NAV : []), ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
+  const items = [...NAV, ...(["admin", "manager"].includes(state.user.role) ? EXEC_NAV : []), ...(isStaff() || can("export") ? REPORT_NAV : []), ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
     href === "sep" ? h("div", { class: "sep" }, label)
       : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?")) ? "active" : "" },
         label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null,
@@ -134,7 +143,7 @@ function shell(content, taskCount) {
     try { await api("/me/prefs", { method: "PUT", body: { theme: e.target.value, page_size: (state.prefs || {}).page_size || 20 } }); state.prefs.theme = e.target.value; } catch { /* */ } } });
   return h("div", { class: "shell" },
     h("nav", { class: "side", "aria-label": "القائمة الرئيسية" },
-      h("h1", {}, "منصة الاتصالات الإدارية"), items, saved,
+      h("h1", {}, "منصة الاتصالات الإدارية"), scanBox(), items, saved,
       h("div", { class: "who" }, h("div", {}, state.user.full_name), h("div", { class: "small" }, L.role[state.user.role]),
         h("label", { class: "small themelb" }, "السمة ", themeSel),
         h("button", { class: "btn ghost sm", onclick: doLogout }, "تسجيل الخروج"))),
@@ -149,7 +158,12 @@ function loginView() {
   const form = h("form", { class: "card", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     try {
-      const r = await api("/login", { method: "POST", body: { username: form.u.value.trim(), password: form.p.value } });
+      let r = await api("/login", { method: "POST", body: { username: form.u.value.trim(), password: form.p.value } });
+      if (r.mfa_required) {  // خطوة ثانية: رمز TOTP أو رمز استرداد
+        const code = prompt("أدخل رمز المصادقة الثنائية (6 أرقام من تطبيق المصادقة) أو أحد رموز الاسترداد:");
+        if (!code) throw new Error("لم يُدخَل رمز التحقق");
+        r = await api("/login/mfa", { method: "POST", body: { ticket: r.ticket, code: code.trim() } });
+      }
       state.token = r.token; sessionStorage.setItem("acp_token", r.token); state.user = r.user;
       await boot();
     } catch (ex) { err.textContent = ex.message; }
@@ -293,28 +307,44 @@ async function listView(q) {
   const all = h("input", { type: "checkbox", "aria-label": "تحديد الكل", onchange: () => { data.items.forEach((c) => (all.checked ? sel$.add(c.id) : sel$.delete(c.id))); refreshBar(); } });
 
   const timeOf = (s) => { const d = new Date(s.replace(" ", "T")); return d.toLocaleTimeString("ar-u-nu-latn", { hour: "2-digit", minute: "2-digit", hour12: true }); };
+  // أعمدة قابلة للتخصيص (تفضيل المستخدم): المفتاح ← عنوان وخلية
+  const replyHref = (c) => `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&subject=${encodeURIComponent("رد: " + c.subject)}`;
+  const COLS = {
+    read: ["حالة القراءة", (c) => h("td", { class: "nowrap" }, h("span", { class: "dot " + (c.is_read ? "r" : "u") }), c.is_read ? "مقروءة" : "غير مقروءة")],
+    party: ["المرسل / الجهة", (c) => h("td", {}, c.party, h("div", { class: "small muted" }, typeLabel(c)))],
+    subject: ["موضوع الرسالة", (c) => h("td", { class: "subj" },
+      h("button", { class: "pinbtn" + (c.pinned ? " on" : ""), title: c.pinned ? "إلغاء التثبيت" : "تثبيت", "aria-label": "تثبيت", onclick: async () => { try { await api(`/correspondences/${c.id}/pin`, { method: "POST", body: { pinned: !c.pinned } }); render(); } catch (e) { toast(e.message, true); } } }, c.pinned ? "★" : "☆"),
+      h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null,
+      c.type_name || c.folder_name ? h("div", { class: "small muted" }, [c.type_name, c.folder_name && "📁 " + c.folder_name].filter(Boolean).join(" • ")) : null)],
+    ref: ["رقم المعاملة", (c) => h("td", { class: "ltr nowrap" }, c.ref_no)],
+    date: ["تاريخ الاستلام", (c) => h("td", { class: "nowrap" }, c.created_at.slice(0, 10).replaceAll("-", "/"), h("div", { class: "small muted" }, timeOf(c.created_at)))],
+    priority: ["التصنيف", (c) => h("td", {}, prioPill(c.priority))],
+    status: ["حالة المعاملة", (c) => h("td", {}, statusPill(c.status))],
+    reply: ["الرد", (c) => h("td", { class: "nowrap" }, replyBadge(c))],
+    att: ["المرفقات", (c) => h("td", { class: "nowrap" }, c.att_count ? `📎 ${c.att_count}` : "—")],
+    sla: ["SLA", (c) => h("td", { class: "nowrap" }, slaBadge(c))],
+    actions: ["الإجراءات", (c) => h("td", { class: "acts" },
+      h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "عرض", "aria-label": "عرض" }, "👁"),
+      h("a", { class: "iconbtn", href: replyHref(c), title: "رد", "aria-label": "رد" }, "↩"),
+      h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "إحالة", "aria-label": "إحالة" }, "↪"))],
+  };
+  const DEFAULT_COLS = ["read", "party", "subject", "ref", "date", "priority", "status", "sla", "reply", "att", "actions"];
+  const cols = ((state.prefs.columns || DEFAULT_COLS).filter((k) => COLS[k]));
+  const colMenu = h("details", { class: "colmenu" }, h("summary", { class: "btn ghost sm" }, "⚙ الأعمدة"),
+    h("div", { class: "card colbox" }, Object.entries(COLS).map(([k, [title]]) => h("label", { class: "opt" },
+      h("input", { type: "checkbox", checked: cols.includes(k), onchange: async (e) => {
+        const next = Object.keys(COLS).filter((x) => (x === k ? e.target.checked : cols.includes(x)));
+        try { await api("/me/prefs", { method: "PUT", body: { theme: state.prefs.theme, page_size: state.prefs.page_size, columns: next } }); state.prefs.columns = next; render(); } catch (ex) { toast(ex.message, true); }
+      } }), title)),
+      h("button", { class: "btn ghost sm", onclick: async () => { await api("/me/prefs", { method: "PUT", body: { theme: state.prefs.theme, page_size: state.prefs.page_size, columns: [] } }); state.prefs.columns = null; render(); } }, "الأعمدة الافتراضية")));
   const rows = data.items.map((c) => {
     const cb = h("input", { type: "checkbox", "aria-label": "تحديد", onchange: () => { cb.checked ? sel$.add(c.id) : sel$.delete(c.id); refreshBar(); } });
     checks.push([c.id, cb]);
-    return h("tr", { class: c.is_read ? "" : "unread" },
-      h("td", {}, cb),
-      h("td", { class: "nowrap" }, h("span", { class: "dot " + (c.is_read ? "r" : "u") }), c.is_read ? "مقروءة" : "غير مقروءة"),
-      h("td", {}, c.party, h("div", { class: "small muted" }, typeLabel(c))),
-      h("td", { class: "subj" }, h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null,
-        c.type_name || c.folder_name ? h("div", { class: "small muted" }, [c.type_name, c.folder_name && "📁 " + c.folder_name].filter(Boolean).join(" • ")) : null),
-      h("td", { class: "ltr nowrap" }, c.ref_no),
-      h("td", { class: "nowrap" }, c.created_at.slice(0, 10).replaceAll("-", "/"), h("div", { class: "small muted" }, timeOf(c.created_at))),
-      h("td", {}, prioPill(c.priority)),
-      h("td", {}, statusPill(c.status)),
-      h("td", { class: "nowrap" }, replyBadge(c)),
-      h("td", { class: "nowrap" }, c.att_count ? `📎 ${c.att_count}` : "—"),
-      h("td", { class: "acts" },
-        h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "عرض", "aria-label": "عرض" }, "👁"),
-        h("a", { class: "iconbtn", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&subject=${encodeURIComponent("رد: " + c.subject)}`, title: "رد", "aria-label": "رد" }, "↩"),
-        h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "إحالة", "aria-label": "إحالة" }, "↪")));
+    return h("tr", { class: [c.is_read ? "" : "unread", c.sla_state === "breach" ? "sla-breach" : c.sla_state === "warn" ? "sla-warn" : "", c.pinned ? "pinned" : ""].join(" ").trim() },
+      h("td", {}, cb), cols.map((k) => COLS[k][1](c)));
   });
   const table = rows.length ? h("div", { class: "tbl-wrap" }, h("table", { class: "mail" },
-    h("thead", {}, h("tr", {}, h("th", {}, all), ["حالة القراءة", "المرسل / الجهة", "موضوع الرسالة", "رقم المعاملة", "تاريخ الاستلام", "التصنيف", "حالة المعاملة", "الرد", "المرفقات", "الإجراءات"].map((t) => h("th", {}, t)))),
+    h("thead", {}, h("tr", {}, h("th", {}, all), cols.map((k) => h("th", {}, COLS[k][0])))),
     h("tbody", {}, rows))) : h("div", { class: "card empty" }, "لا توجد مراسلات مطابقة");
 
   const pages = Math.max(1, Math.ceil(data.total / data.size));
@@ -330,7 +360,9 @@ async function listView(q) {
 
   return [h("div", { class: "page-head" }, h("div", { class: "ph-ico" }, dir === "outgoing" ? "📤" : "📥"), h("div", {}, h("h2", {}, title), h("div", { class: "muted small" }, subtitle)),
     h("a", { class: "btn", href: `#/new?direction=${dir || "incoming"}` }, "+ تسجيل جديد")),
-    kpis, form, bar, table, pager];
+    kpis, form, h("div", { class: "row tools" }, colMenu,
+      h("a", { class: "btn ghost sm", href: "#/list?" + new URLSearchParams({ ...Object.fromEntries(params), pinned: "1", page: 1 }) }, "★ المثبّتة"),
+      h("span", { class: "small muted" }, "اختصارات: N معاملة جديدة · / فتح بالباركود")), bar, table, pager];
 }
 
 function sel(name, opts, val, extra) {
@@ -466,6 +498,28 @@ async function newView(q) {
     priority: (key) => { const r = form.querySelector(`input[name=priority][value="${key}"]`); if (r) r.checked = true; },
     unit: (u) => unitPicker.add({ id: u.id, full_name: u.name }), assignee: (u) => assignPicker.add({ id: u.id, full_name: u.name }),
   });
+  // كشف التكرار قبل القيد: نفس رقم مرجع الجهة أو موضوع مطابق، مع اقتراح الربط بعد الحفظ
+  const dupBox = h("div", { class: "dupbox", hidden: true, "aria-live": "polite" });
+  let dupTimer = null, dupLast = "";
+  const dupLinks = new Set();
+  const dupCheck = () => {
+    clearTimeout(dupTimer);
+    dupTimer = setTimeout(async () => {
+      const inp = { party: val("party"), party_ref: val("party_ref"), subject: val("subject") };
+      const key = JSON.stringify(inp);
+      if (key === dupLast || (!inp.party_ref && inp.subject.length < 6)) return;
+      dupLast = key;
+      try {
+        const rows = await api("/duplicates?" + new URLSearchParams(inp));
+        dupLinks.clear();
+        dupBox.replaceChildren(h("strong", {}, "⚠ قد تكون المراسلة مسجّلة سابقًا:"), ...rows.map((d) => h("div", { class: "dup" },
+          h("a", { href: "#/c/" + d.id, target: "_blank", class: "ltr" }, d.ref_no), ` — ${d.subject} `, h("span", { class: "small muted" }, `(${d.reason}${d.score < 1 ? " " + Math.round(d.score * 100) + "٪" : ""})`),
+          h("label", { class: "opt" }, h("input", { type: "checkbox", onchange: (e) => (e.target.checked ? dupLinks.add(d.ref_no) : dupLinks.delete(d.ref_no)) }), "اربطها بهذه المعاملة بعد الحفظ"))));
+        dupBox.hidden = !rows.length;
+      } catch { dupBox.hidden = true; }
+    }, 900);
+  };
+  let asDraft = false;
   // قوالب الخطابات: تملأ الموضوع والرسالة بمتغيرات الأصل والجهة
   const tplPick = templates.length ? sel("tpl", { "": "— بدون قالب —", ...Object.fromEntries(templates.map((t) => [t.id, t.name])) }, "", { "aria-label": "قالب الخطاب", onchange: (e) => {
     const t = templates.find((x) => x.id === Number(e.target.value)); if (!t) return;
@@ -491,13 +545,16 @@ async function newView(q) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
     }
     if (parent) body.parent_id = Number(parent);
+    if (asDraft) body.draft = true;
+    asDraft = false;
     const tags = tagsBox.values();
     if (tags.length) body.tags = tags;
     try {
       const r = await api("/correspondences", { method: "POST", body });
       const file = form.file.files[0];
       if (file) await upload(r.id, file);
-      if (wfPick && wfPick.value) {
+      for (const ref of dupLinks) { try { await api(`/correspondences/${r.id}/related`, { method: "POST", body: { ref_no: ref } }); } catch { /* الربط اختياري */ } }
+      if (wfPick && wfPick.value && !body.draft) {
         try { await api(`/correspondences/${r.id}/workflow`, { method: "POST", body: { workflow_id: Number(wfPick.value) } }); }
         catch (we) { toast("سُجّلت المراسلة لكن تعذّر بدء المسار: " + we.message, true); }
       }
@@ -511,11 +568,12 @@ async function newView(q) {
       canExternal ? radio("scope", "external", "خارجي", (q.get("scope") || "external") === "external") : null,
       radio("scope", "internal", "داخلي", !canExternal || q.get("scope") === "internal"))),
     tplPick ? row("قالب الخطاب", tplPick) : null,
-    row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "", oninput: sug.trigger }), true),
-    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة", value: q.get("party") || "", oninput: sug.trigger }), true),
-    row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة", oninput: sug.trigger })),
+    row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "", oninput: () => { sug.trigger(); dupCheck(); } }), true),
+    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة", value: q.get("party") || "", oninput: () => { sug.trigger(); dupCheck(); } }), true),
+    row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة", oninput: () => { sug.trigger(); dupCheck(); } })),
     row(h("span", {}, "اقتراحات ذكية"), sug.node),
-    row("الرقم المتسلسل للمراسلة", h("input", { name: "party_ref", maxlength: 100, placeholder: "حروف وأرقام" })),
+    row(h("span", {}, "تنبيه التكرار"), dupBox),
+    row("الرقم المتسلسل للمراسلة", h("input", { name: "party_ref", maxlength: 100, placeholder: "حروف وأرقام", oninput: () => dupCheck() })),
     row("المرفق", h("input", { type: "file", name: "file" })),
     row(h("span", {}, "تصنيف الوثيقة"), classes),
     row("نوع المعاملة", sel("type_id", { "": "— اختر —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, "")),
@@ -536,7 +594,7 @@ async function newView(q) {
       row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date" })),
       row("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
       row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" }))),
-    err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));
+    err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("button", { type: "button", class: "btn ghost", onclick: () => { asDraft = true; form.requestSubmit(); } }, "حفظ كمسودة"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));
   syncDir();
   return [title, form];
 }
@@ -604,7 +662,7 @@ async function detailView(id) {
       m("رقم القيد", h("span", { class: "ltr" }, c.ref_no)), m("النوع", typeLabel(c)),
       m("الجهة", c.party), m("رقم مرجع الجهة", c.party_ref || "—"),
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
-      m("الاستحقاق", c.due_date || "—"), m(c.units.length > 1 ? "الوحدات المسؤولة" : "الوحدة المسؤولة", c.units.length ? c.units.join("، ") : c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
+      m("الاستحقاق", c.due_date || "—"), c.sla_due_at ? m("مهلة SLA", `${c.sla_hours} ساعة عمل — حتى ${c.sla_due_at.slice(0, 16)}`) : null, m(c.units.length > 1 ? "الوحدات المسؤولة" : "الوحدة المسؤولة", c.units.length ? c.units.join("، ") : c.department_name || "—"), c.party_dept_name ? m("الإدارة المعنية", c.party_dept_name) : null,
       m("المُسنَد إليهم", c.assignees.length ? c.assignees.join("، ") : "—"),
       c.directives.length || c.directive_other ? m("توجيه الإسناد", [...c.directives, c.directive_other].filter(Boolean).join("، ")) : null, m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
       m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
@@ -615,12 +673,13 @@ async function detailView(id) {
       m("سُجّلت بواسطة", `${c.creator_name} — ${fmtDT(c.created_at)}`),
       c.parent ? m("رد على", h("a", { href: "#/c/" + c.parent.id }, c.parent.ref_no)) : null),
       c.summary ? h("p", {}, h("strong", {}, "الملخص: "), c.summary) : null,
-      h("div", { class: "row" }, c.can_reply ? h("a", { class: "btn ghost sm", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&party=${encodeURIComponent(c.party)}&subject=${encodeURIComponent("رد: " + c.subject)}` }, "تسجيل رد") : null,
+      h("div", { class: "row" }, detailTools(c), c.can_reply ? h("a", { class: "btn ghost sm", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&party=${encodeURIComponent(c.party)}&subject=${encodeURIComponent("رد: " + c.subject)}` }, "تسجيل رد") : null,
         h("button", { class: "btn ghost sm", onclick: () => window.print() }, "طباعة"))),
     replyCard, manage, transferBox, ...extras,
     h("div", { class: "card" }, h("h3", {}, `المرفقات (${c.attachments.length})`),
       c.attachments.length ? h("table", {}, h("tbody", {}, c.attachments.map((a) => h("tr", {},
-        h("td", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); dl(a); } }, a.filename)), h("td", {}, sizeStr(a.size)),
+        h("td", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); dl(a); } }, a.filename), " ",
+          previewable(a.filename) ? h("button", { class: "btn ghost sm", onclick: () => previewAttachment(a, c) }, "👁 معاينة") : null), h("td", {}, sizeStr(a.size)),
         h("td", { class: "small muted" }, a.uploader, " — ", fmtDT(a.created_at)),
         h("td", { class: "small muted ltr", title: "بصمة SHA-256 للتحقق من سلامة الملف" }, a.sha256.slice(0, 16) + "…"))))) : h("div", { class: "muted" }, "لا مرفقات"),
       c.status !== "archived" ? h("div", { class: "row" }, fileIn, h("button", { class: "btn sm", onclick: async () => {
@@ -699,7 +758,7 @@ async function boot() {
   try {
     state.user = await api("/me"); // يعمل أيضًا دون رمز عند الدخول الموحّد (SSO) عبر الوسيط الموثوق
     if (!state.user.must_change) await loadRefs();
-    if (!boot.polling) { boot.polling = true; setInterval(pollNotifications, 30000); pollNotifications(); }
+    if (!boot.polling) { boot.polling = true; setInterval(pollNotifications, 30000); pollNotifications(); startRealtime(); }
   } catch { state.user = null; state.token = null; sessionStorage.removeItem("acp_token"); }
   render();
 }
@@ -718,6 +777,7 @@ async function render() {
     else if (path === "/tasks") view = await tasksView();
     else if (path === "/new") view = await newView(q);
     else if (EXT_ROUTES[path]) view = await EXT_ROUTES[path](q);
+    else if (Object.keys(EXT_PREFIX).some((p) => path.startsWith(p))) { const pre = Object.keys(EXT_PREFIX).find((p) => path.startsWith(p)); view = await EXT_PREFIX[pre](Number(path.slice(pre.length)), q); }
     else if (path === "/password") view = changePasswordView(false);
     else if (path.startsWith("/c/")) view = await detailView(Number(path.slice(3)));
     else if (path === "/reports" && (isStaff() || can("export"))) view = await reportsView(q);

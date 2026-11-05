@@ -26,6 +26,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS retention_policies(
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, class_key TEXT, type_id INTEGER, after_days INTEGER NOT NULL,
   action TEXT NOT NULL CHECK(action IN('archive','dispose')), active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS disposal_batches(
+  id INTEGER PRIMARY KEY, created_by INTEGER NOT NULL, created_at TEXT NOT NULL, reason TEXT NOT NULL, ids TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', executed_at TEXT);
+CREATE TABLE IF NOT EXISTS disposal_votes(
+  batch_id INTEGER NOT NULL, user_id INTEGER NOT NULL, decision TEXT NOT NULL, comment TEXT, at TEXT NOT NULL, PRIMARY KEY(batch_id, user_id));
 CREATE TABLE IF NOT EXISTS disposal_log(
   id INTEGER PRIMARY KEY, corr_id INTEGER NOT NULL, ref_no TEXT NOT NULL, subject TEXT, disposed_by INTEGER NOT NULL,
   disposed_at TEXT NOT NULL, reason TEXT NOT NULL, attachments TEXT NOT NULL);
@@ -169,6 +174,29 @@ def install(S):
     def ret_candidates(ctx):
         return 200, candidates(ctx.conn)
 
+    def do_dispose(ctx, ids, reason):
+        """يحذف ملفات المرفقات (العادي والبارد) ويُبقي بيانات المراسلة وسجل إتلاف ببصمات الملفات."""
+        done = 0
+        for cid in ids:
+            c = ctx.conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
+            atts = ctx.conn.execute("SELECT id, filename, stored_name, sha256, cold FROM attachments WHERE corr_id=? AND removed_at IS NULL", (cid,)).fetchall()
+            for a in atts:
+                try:
+                    os.remove(os.path.join(S.COLD if a["cold"] else S.UPLOADS, a["stored_name"]))
+                except FileNotFoundError:
+                    pass
+                ctx.conn.execute("UPDATE attachments SET removed_at=? WHERE id=?", (now(), a["id"]))
+            ctx.conn.execute("UPDATE correspondences SET disposed_at=?, updated_at=? WHERE id=?", (now(), now(), cid))
+            ctx.conn.execute("INSERT INTO disposal_log(corr_id,ref_no,subject,disposed_by,disposed_at,reason,attachments) VALUES(?,?,?,?,?,?,?)",
+                             (cid, c["ref_no"], c["subject"], ctx.user["id"], now(), reason,
+                              json.dumps([{"filename": a["filename"], "sha256": a["sha256"]} for a in atts], ensure_ascii=False)))
+            audit(ctx, "retention_dispose", "correspondence", cid, reason)
+            done += 1
+        return done
+
+    def approvals_required(conn):
+        return int(S.get_settings(conn)["disposal_approvals"])
+
     @route("POST", r"/api/admin/retention/apply", roles=("admin",))
     def ret_apply(ctx):
         b = ctx.body
@@ -178,6 +206,10 @@ def install(S):
             raise ApiError(400, "طلب غير صالح")
         if not S.verify_password(str(b.get("password", "")), ctx.user["password_hash"]):
             raise ApiError(400, "كلمة المرور غير صحيحة — يلزم تأكيد هذا الإجراء بها")
+        if hasattr(S, "require_second_factor"):
+            S.require_second_factor(ctx)
+        if action == "dispose" and approvals_required(ctx.conn) > 0:
+            raise ApiError(400, "الإتلاف يتطلب اعتماد لجنة الوثائق: أنشئ دفعة إتلاف من «الاحتجاز والإتلاف» لتُعرض على اللجنة")
         reason = f_text(b, "reason", 300, action == "dispose", "سبب الإتلاف")
         allowed = {c["id"] for c in candidates(ctx.conn) if c["action"] == action}
         bad = [i for i in ids if i not in allowed]
@@ -185,27 +217,121 @@ def install(S):
             raise ApiError(400, f"مراسلات غير مؤهلة حسب السياسات أو عليها تجميد قانوني: {bad[:5]}")
         done = 0
         with S.tx(ctx.conn):
-            for cid in ids:
-                c = ctx.conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
-                if action == "archive":
+            if action == "archive":
+                for cid in ids:
                     ctx.conn.execute("UPDATE correspondences SET status='archived', updated_at=? WHERE id=?", (now(), cid))
                     audit(ctx, "retention_archive", "correspondence", cid, reason or "سياسة احتجاز")
-                else:
-                    atts = ctx.conn.execute("SELECT id, filename, stored_name, sha256 FROM attachments WHERE corr_id=? AND removed_at IS NULL", (cid,)).fetchall()
-                    for a in atts:
-                        try:
-                            os.remove(os.path.join(S.UPLOADS, a["stored_name"]))
-                        except FileNotFoundError:
-                            pass
-                        ctx.conn.execute("UPDATE attachments SET removed_at=? WHERE id=?", (now(), a["id"]))
-                    ctx.conn.execute("UPDATE correspondences SET disposed_at=?, updated_at=? WHERE id=?", (now(), now(), cid))
-                    ctx.conn.execute("INSERT INTO disposal_log(corr_id,ref_no,subject,disposed_by,disposed_at,reason,attachments) VALUES(?,?,?,?,?,?,?)",
-                                     (cid, c["ref_no"], c["subject"], ctx.user["id"], now(), reason,
-                                      json.dumps([{"filename": a["filename"], "sha256": a["sha256"]} for a in atts], ensure_ascii=False)))
-                    audit(ctx, "retention_dispose", "correspondence", cid, reason)
-                done += 1
+                    done += 1
+            else:
+                done = do_dispose(ctx, ids, reason)
         return 200, {"done": done}
 
+    # ───────────── لجنة الوثائق: اعتماد الإتلاف بفصل المهام ─────────────
+    S.PERMS["disposal_committee"] = "عضوية لجنة الوثائق (التصويت على الإتلاف)"
+    S.SETTING_DEFAULTS.update({"disposal_approvals": "0", "cold_after_days": "0"})
+
+    def is_committee(conn, u):
+        if u["role"] == "admin":
+            return True
+        return "disposal_committee" in u.get("perms", ())
+
+    @route("POST", r"/api/admin/disposal-batches", roles=("admin",))
+    def batch_create(ctx):
+        ids, reason = ctx.body.get("ids"), f_text(ctx.body, "reason", 300, True, "سبب الإتلاف")
+        if not isinstance(ids, list) or not ids or len(ids) > 500 or not all(isinstance(i, int) for i in ids):
+            raise ApiError(400, "قائمة غير صالحة")
+        allowed = {c["id"] for c in candidates(ctx.conn) if c["action"] == "dispose"}
+        bad = [i for i in ids if i not in allowed]
+        if bad:
+            raise ApiError(400, f"مراسلات غير مؤهلة للإتلاف: {bad[:5]}")
+        cur = ctx.conn.execute("INSERT INTO disposal_batches(created_by,created_at,reason,ids) VALUES(?,?,?,?)", (ctx.user["id"], now(), reason, json.dumps(ids)))
+        audit(ctx, "disposal_batch_create", "batch", cur.lastrowid, f"{len(ids)} مراسلة — {reason}")
+        roles = {r[0] for r in ctx.conn.execute("SELECT role FROM role_perms WHERE perm='disposal_committee' AND allowed=1")} | {"admin"}
+        for (uid,) in ctx.conn.execute(f"SELECT id FROM users WHERE active=1 AND role IN ({','.join('?' * len(roles))}) AND id<>?", list(roles) + [ctx.user["id"]]).fetchall():
+            S.notify(ctx.conn, uid, "disposal_vote", "دفعة إتلاف بانتظار تصويتك", f"{len(ids)} مراسلة — {reason}", None, dedupe=f"batch:{cur.lastrowid}:{uid}")
+        return 201, {"id": cur.lastrowid}
+
+    @route("GET", r"/api/admin/disposal-batches")
+    def batch_list(ctx):
+        if not is_committee(ctx.conn, ctx.user):
+            raise ApiError(403, "لجنة الوثائق فقط")
+        out = []
+        for b in ctx.conn.execute("SELECT b.*, u.full_name AS creator FROM disposal_batches b JOIN users u ON u.id=b.created_by ORDER BY b.id DESC LIMIT 50"):
+            votes = [dict(v) for v in ctx.conn.execute("SELECT v.decision, v.comment, v.at, u.full_name FROM disposal_votes v JOIN users u ON u.id=v.user_id WHERE v.batch_id=?", (b["id"],))]
+            ids = json.loads(b["ids"])
+            sample = [dict(r) for r in ctx.conn.execute(f"SELECT id, ref_no, subject FROM correspondences WHERE id IN ({','.join('?' * len(ids))}) LIMIT 8", ids)]
+            out.append({**{k: b[k] for k in ("id", "creator", "created_at", "reason", "status", "executed_at")}, "count": len(ids), "sample": sample, "votes": votes,
+                        "required": approvals_required(ctx.conn), "i_voted": any(v["full_name"] == ctx.user["full_name"] for v in votes)})
+        return 200, out
+
+    @route("POST", r"/api/admin/disposal-batches/(?P<id>\d+)/vote")
+    def batch_vote(ctx):
+        if not is_committee(ctx.conn, ctx.user):
+            raise ApiError(403, "لجنة الوثائق فقط")
+        b = ctx.conn.execute("SELECT * FROM disposal_batches WHERE id=?", (int(ctx.params["id"]),)).fetchone()
+        if not b or b["status"] != "pending":
+            raise ApiError(404, "الدفعة غير موجودة أو أُغلق التصويت عليها")
+        if b["created_by"] == ctx.user["id"]:
+            raise ApiError(403, "لا يصوّت من أنشأ الدفعة (فصل المهام)")
+        decision = ctx.body.get("decision")
+        if decision not in ("approve", "reject"):
+            raise ApiError(400, "قرار غير صالح")
+        comment = f_text(ctx.body, "comment", 300, decision == "reject", "سبب الرفض")
+        if not S.verify_password(str(ctx.body.get("password", "")), ctx.user["password_hash"]):
+            raise ApiError(400, "كلمة المرور غير صحيحة")
+        if hasattr(S, "require_second_factor"):
+            S.require_second_factor(ctx)
+        try:
+            with S.tx(ctx.conn):
+                ctx.conn.execute("INSERT INTO disposal_votes VALUES(?,?,?,?,?)", (b["id"], ctx.user["id"], decision, comment, now()))
+                approves = ctx.conn.execute("SELECT COUNT(*) FROM disposal_votes WHERE batch_id=? AND decision='approve'", (b["id"],)).fetchone()[0]
+                status = "rejected" if decision == "reject" else ("approved" if approves >= max(1, approvals_required(ctx.conn)) else "pending")
+                if status != "pending":
+                    ctx.conn.execute("UPDATE disposal_batches SET status=? WHERE id=?", (status, b["id"]))
+                audit(ctx, "disposal_vote", "batch", b["id"], f"{decision} — {comment or ''}")
+        except sqlite3.IntegrityError:
+            raise ApiError(400, "سبق أن صوّتّ على هذه الدفعة")
+        return 200, {"status": status}
+
+    @route("POST", r"/api/admin/disposal-batches/(?P<id>\d+)/execute", roles=("admin",))
+    def batch_execute(ctx):
+        b = ctx.conn.execute("SELECT * FROM disposal_batches WHERE id=?", (int(ctx.params["id"]),)).fetchone()
+        if not b or b["status"] != "approved":
+            raise ApiError(400, "الدفعة غير معتمدة من اللجنة")
+        if not S.verify_password(str(ctx.body.get("password", "")), ctx.user["password_hash"]):
+            raise ApiError(400, "كلمة المرور غير صحيحة")
+        if hasattr(S, "require_second_factor"):
+            S.require_second_factor(ctx)
+        ids = json.loads(b["ids"])
+        allowed = {c["id"] for c in candidates(ctx.conn) if c["action"] == "dispose"}
+        still = [i for i in ids if i in allowed]  # قد يُجمَّد بعضها قانونيًا بعد الاعتماد فيُستثنى
+        with S.tx(ctx.conn):
+            done = do_dispose(ctx, still, b["reason"] + f" (دفعة #{b['id']} باعتماد اللجنة)")
+            ctx.conn.execute("UPDATE disposal_batches SET status='executed', executed_at=? WHERE id=?", (now(), b["id"]))
+        return 200, {"done": done, "skipped": len(ids) - len(still)}
+
+    # ───────────── الأرشيف الوسيط (البارد) ─────────────
+    def move_cold(conn):
+        days = int(S.get_settings(conn)["cold_after_days"])
+        if not days:
+            return {"moved": 0}
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        moved = 0
+        for a in conn.execute("SELECT a.id, a.stored_name FROM attachments a JOIN correspondences c ON c.id=a.corr_id WHERE c.status='archived' AND c.updated_at<=? "
+                              "AND a.cold=0 AND a.removed_at IS NULL LIMIT 500", (cutoff,)).fetchall():
+            src = os.path.join(S.UPLOADS, a["stored_name"])
+            if os.path.isfile(src):
+                shutil.move(src, os.path.join(S.COLD, a["stored_name"]))
+                conn.execute("UPDATE attachments SET cold=1 WHERE id=?", (a["id"],))
+                moved += 1
+        return {"moved": moved}
+    S.EXT_TICK.append(move_cold)
+
+    @route("POST", r"/api/admin/cold/run", roles=("admin",))
+    def cold_run(ctx):
+        res = move_cold(ctx.conn)
+        audit(ctx, "cold_tier", detail=f"نُقل {res['moved']} ملفًا للأرشيف الوسيط")
+        return 200, res
     @route("GET", r"/api/admin/disposal-log", roles=("admin",))
     def disposal_log(ctx):
         return 200, [dict(r) for r in ctx.conn.execute(
@@ -228,6 +354,8 @@ def install(S):
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
         return h.hexdigest()
+
+    OFFSITE = {"ok": None, "at": None, "error": None, "file": None}
 
     def make_backup(data_dir=None):
         data_dir = data_dir or S.DATA
@@ -253,6 +381,13 @@ def install(S):
                         if os.path.isfile(fp):
                             z.write(fp, f"uploads/{n}")
                             manifest["files"][f"uploads/{n}"] = sha_file(fp)
+                cd = os.path.join(data_dir, "cold")
+                if os.path.isdir(cd):
+                    for n in sorted(os.listdir(cd)):
+                        fp = os.path.join(cd, n)
+                        if os.path.isfile(fp):
+                            z.write(fp, f"cold/{n}")
+                            manifest["files"][f"cold/{n}"] = sha_file(fp)
                 key = os.path.join(data_dir, "sign.key")
                 if os.path.isfile(key):  # لازم للتحقق من التوقيعات بعد الاسترجاع — احفظ النسخة في مكان آمن
                     z.write(key, "sign.key")
@@ -261,6 +396,17 @@ def install(S):
             os.replace(path + ".part", path)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        copy_dir = os.environ.get("ACP_BACKUP_COPY_DIR")  # نسخة في موقع بديل (مشاركة شبكية/قرص خارجي) مع التحقق من البصمة
+        if copy_dir:
+            try:
+                os.makedirs(copy_dir, exist_ok=True)
+                dst_p = os.path.join(copy_dir, os.path.basename(path))
+                shutil.copy2(path, dst_p)
+                if sha_file(dst_p) != sha_file(path):
+                    raise IOError("بصمة النسخة البديلة لا تطابق الأصل")
+                OFFSITE.update(ok=True, at=now(), error=None, file=os.path.basename(path))
+            except Exception as e:
+                OFFSITE.update(ok=False, at=now(), error=str(e)[:200])
         return path
     S.make_backup = make_backup
 
@@ -290,6 +436,11 @@ def install(S):
                         if os.path.exists(db + ext):
                             os.remove(db + ext)
                 shutil.move(os.path.join(tmp, "acp.db"), db)
+                cdir = os.path.join(data_dir, "cold")
+                os.makedirs(cdir, exist_ok=True)
+                if os.path.isdir(os.path.join(tmp, "cold")):
+                    for n in os.listdir(os.path.join(tmp, "cold")):
+                        shutil.move(os.path.join(tmp, "cold", n), os.path.join(cdir, n))
                 up = os.path.join(data_dir, "uploads")
                 os.makedirs(up, exist_ok=True)
                 if os.path.isdir(os.path.join(tmp, "uploads")):
@@ -510,13 +661,8 @@ def install(S):
         return 200, {"dry_run": dry, "created": created, "skipped": skipped, "errors": errors, "rows": report[:500]}
 
     # ───────────── مؤشرات الأداء (KPI) ─────────────
-    @route("GET", r"/api/kpi")
-    def kpi(ctx):
-        u = ctx.user
-        if not (u["role"] in ("admin", "manager", "clerk") or S.can(u, "export")):
-            raise ApiError(403, "المؤشرات متاحة للمدراء ومكتب الصادر والوارد")
+    def compute_kpi(conn, u, q):
         vs, vp = S.visible_clause(u)
-        conn, q = ctx.conn, ctx.query
         where, p = [vs], list(vp)
         if S.DATE_RE.match(q.get("from", "")):
             where.append("c.doc_date>=?"); p.append(q["from"])
@@ -553,12 +699,110 @@ def install(S):
             f"SELECT us.full_name AS employee, COUNT(*) AS pending FROM transfers t JOIN users us ON us.id=t.to_user JOIN correspondences c ON c.id=t.corr_id "
             f"WHERE t.status='pending' AND {w} GROUP BY t.to_user ORDER BY pending DESC LIMIT 10", p)]
         pct = lambda a, b: round(100 * a / b, 1) if b else None
-        return 200, {
+        # SLA بحسب سياسة التصنيف (ساعات العمل): ما أُنجز في موعده من الإجمالي المقيَّد بمهلة
+        sla_total = one(f"SELECT COUNT(*) FROM correspondences c WHERE {w} AND c.sla_due_at IS NOT NULL AND (c.sla_done_at IS NOT NULL OR c.sla_due_at<datetime('now','localtime'))")
+        sla_met = one(f"SELECT COUNT(*) FROM correspondences c WHERE {w} AND c.sla_due_at IS NOT NULL AND c.sla_done_at IS NOT NULL AND c.sla_done_at<=c.sla_due_at")
+        sla_breached_open = one(f"SELECT COUNT(*) FROM correspondences c WHERE {w} AND {open_} AND c.sla_due_at IS NOT NULL AND c.sla_done_at IS NULL AND c.sla_due_at<datetime('now','localtime')")
+        src = {r[0]: r[1] for r in conn.execute(f"SELECT c.source, COUNT(*) FROM correspondences c WHERE {w} GROUP BY c.source", p)}
+        emp_turn = [dict(r) for r in conn.execute(
+            f"SELECT us.full_name AS employee, COUNT(*) AS done, ROUND(AVG((julianday(t.done_at)-julianday(t.created_at))*24),1) AS avg_hours FROM transfers t "
+            f"JOIN users us ON us.id=t.to_user JOIN correspondences c ON c.id=t.corr_id WHERE t.status='done' AND {w} GROUP BY t.to_user ORDER BY avg_hours DESC LIMIT 10", p)]
+        unit_turn = [dict(r) for r in conn.execute(
+            f"SELECT COALESCE(d.name,'بدون وحدة') AS unit, ROUND(AVG(julianday(c.updated_at)-julianday(c.created_at)),1) AS avg_days, COUNT(*) AS closed FROM correspondences c "
+            f"LEFT JOIN corr_units cu ON cu.corr_id=c.id LEFT JOIN departments d ON d.id=cu.dept_id WHERE {w} AND c.status IN('closed','archived') GROUP BY cu.dept_id ORDER BY avg_days DESC", p)]
+        return {
             "total": total, "open": n_open, "overdue": overdue, "overdue_pct": pct(overdue, n_open),
             "sla_compliance_pct": pct(on_time, with_due), "avg_close_days": round(avg_close, 1) if avg_close is not None else None,
             "avg_first_response_hours": round(avg_first, 1) if avg_first is not None else None,
             "reply_rate_pct": pct(replied, needs), "avg_reply_days": round(avg_reply, 1) if avg_reply is not None else None,
-            "backlog_age": buckets, "monthly": monthly, "units": units, "workload": load}
+            "backlog_age": buckets, "monthly": monthly, "units": units, "workload": load,
+            "sla_policy_compliance_pct": pct(sla_met, sla_total), "sla_breached_open": sla_breached_open,
+            "by_source": src, "electronic_share_pct": pct(sum(v for k, v in src.items() if k != "manual"), total),
+            "employee_turnaround": emp_turn, "unit_turnaround": unit_turn}
+    S.compute_kpi = compute_kpi
+
+    @route("GET", r"/api/kpi")
+    def kpi(ctx):
+        u = ctx.user
+        if not (u["role"] in ("admin", "manager", "clerk") or S.can(u, "export")):
+            raise ApiError(403, "المؤشرات متاحة للمدراء ومكتب الصادر والوارد")
+        return 200, compute_kpi(ctx.conn, u, ctx.query)
+
+    # ───────────── مزامنة الإجازات من الموارد البشرية (تفويض تلقائي) ─────────────
+    @route("POST", r"/api/admin/import/leaves", roles=("admin",))
+    def import_leaves(ctx):
+        """CSV: username, delegate, from, to, note — لكل إجازة يُنشأ تفويض إلى البديل خلال المدة (تفعيل تلقائي بالتكامل مع الموارد البشرية)."""
+        rows = read_csv(ctx)
+        dry = ctx.query.get("dry_run") == "1"
+        report, created, skipped, errors = [], 0, 0, 0
+        with S.tx(ctx.conn):
+            for i, r in enumerate(rows, 2):
+                try:
+                    frm = ctx.conn.execute("SELECT id FROM users WHERE username=? AND active=1", (r.get("username", ""),)).fetchone()
+                    to = ctx.conn.execute("SELECT id FROM users WHERE username=? AND active=1", (r.get("delegate", ""),)).fetchone()
+                    if not frm or not to or frm[0] == to[0]:
+                        raise ValueError("اسم الموظف أو البديل غير صالح")
+                    a, b = r.get("from", ""), r.get("to", "")
+                    da, db = datetime.strptime(a, "%Y-%m-%d"), datetime.strptime(b, "%Y-%m-%d")
+                    if db < da or (db - da).days > 180:
+                        raise ValueError("مدة غير صالحة (الحد 180 يومًا)")
+                    if ctx.conn.execute("SELECT 1 FROM delegations WHERE from_user=? AND to_user=? AND start_date=? AND end_date=? AND active=1", (frm[0], to[0], a, b)).fetchone():
+                        skipped += 1
+                        report.append({"row": i, "result": "skipped", "reason": "موجود مسبقًا"})
+                        continue
+                    ctx.conn.execute("INSERT INTO delegations(from_user,to_user,start_date,end_date,note,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                                     (frm[0], to[0], a, b, r.get("note") or "إجازة (مزامنة الموارد البشرية)", ctx.user["id"], now()))
+                    created += 1
+                    report.append({"row": i, "result": "created"})
+                except Exception as e:
+                    errors += 1
+                    report.append({"row": i, "result": "error", "error": str(e)})
+            if dry:
+                ctx.conn.execute("ROLLBACK")
+                ctx.conn.execute("BEGIN IMMEDIATE")
+            audit(ctx, "import_leaves", detail=f"{'تجريبي ' if dry else ''}منشأ {created} · متخطى {skipped} · أخطاء {errors}")
+        return 200, {"dry_run": dry, "created": created, "skipped": skipped, "errors": errors, "rows": report[:300]}
+
+    # ───────────── موصّل ذكاء الأعمال (Power BI / Tableau): تغذية بيانات مسطّحة آمنة ─────────────
+    @route("GET", r"/api/bi/facts")
+    def bi_facts(ctx):
+        """حقائق المراسلات بصيغة مسطّحة للقراءة فقط (JSON أو CSV). بلا موضوع/ملخص افتراضيًا؛ include_text=1 يضيف موضوع غير السري."""
+        if not S.can(ctx.user, "export"):
+            raise ApiError(403, "تتطلب صلاحية التصدير")
+        vs, vp = S.visible_clause(ctx.user)
+        q = ctx.query
+        where, p = [vs], list(vp)
+        if S.DATE_RE.match(q.get("since", "")):
+            where.append("c.updated_at>=?"); p.append(q["since"])
+        size = min(5000, int(q["size"])) if q.get("size", "").isdigit() and int(q["size"]) > 0 else 1000
+        page = max(1, int(q["page"])) if q.get("page", "").isdigit() else 1
+        w = " AND ".join(where)
+        total = ctx.conn.execute(f"SELECT COUNT(*) FROM correspondences c WHERE {w}", p).fetchone()[0]
+        names = {k: v["label"] for k, v in S.classes(ctx.conn, False).items()}
+        rows = ctx.conn.execute(
+            "SELECT c.id, c.ref_no, c.scope, c.direction, c.status, c.priority, c.conf_level, c.doc_date, c.created_at, c.updated_at, c.due_date, c.sla_hours, "
+            "c.sla_due_at, c.sla_done_at, c.source, c.needs_reply, d.name AS unit, ct.name AS type, fo.name AS folder, c.subject, "
+            "(SELECT COUNT(*) FROM attachments a WHERE a.corr_id=c.id AND a.removed_at IS NULL) AS attachments, "
+            "(SELECT COUNT(*) FROM correspondences r WHERE r.parent_id=c.id) AS replies "
+            "FROM correspondences c LEFT JOIN departments d ON d.id=c.department_id LEFT JOIN ctypes ct ON ct.id=c.type_id LEFT JOIN folders fo ON fo.id=c.folder_id "
+            f"WHERE {w} ORDER BY c.id LIMIT ? OFFSET ?", p + [size, (page - 1) * size]).fetchall()
+        inc = q.get("include_text") == "1"
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["priority"] = names.get(d["priority"], d["priority"])
+            if not (inc and d["conf_level"] == 0):
+                d.pop("subject")
+            items.append(d)
+        if q.get("format") == "csv":
+            out = io.StringIO()
+            cols = list(items[0].keys()) if items else ["id"]
+            wr = csv.DictWriter(out, fieldnames=cols)
+            wr.writeheader()
+            for d in items:
+                wr.writerow({k: ("'" + v if isinstance(v, str) and v[:1] in "=+-@" else v) for k, v in d.items()})
+            return S.Raw(200, ("﻿" + out.getvalue()).encode("utf-8"), {"Content-Type": "text/csv; charset=utf-8"})
+        return 200, {"total": total, "page": page, "size": size, "next_page": page + 1 if page * size < total else None, "items": items}
 
     # ───────────── حالة النظام ─────────────
     @route("GET", r"/api/admin/system", roles=("admin",))
@@ -578,5 +822,9 @@ def install(S):
             "backups": len(files), "last_backup": last, "audit_chain": chain,
             "encryption_at_rest": bool(S.FILE_CODEC["enc"]), "sso": bool(sso_header and sso_secret),
             "tls": bool(os.environ.get("ACP_TLS_CERT")), "backup_hours": os.environ.get("ACP_BACKUP_HOURS", "24"),
+            "offsite_backup": {**OFFSITE, "configured": bool(os.environ.get("ACP_BACKUP_COPY_DIR"))},
+            "cold_files": ctx.conn.execute("SELECT COUNT(*) FROM attachments WHERE cold=1 AND removed_at IS NULL").fetchone()[0],
+            "mfa_users": ctx.conn.execute("SELECT COUNT(*) FROM users WHERE mfa_enabled=1 AND active=1").fetchone()[0],
+            "strict_secret": ctx.conn.execute("SELECT v FROM settings WHERE k='abac_strict_secret'").fetchone() == ("1",),
             "users": ctx.conn.execute("SELECT COUNT(*) FROM users WHERE active=1").fetchone()[0],
             "correspondences": ctx.conn.execute("SELECT COUNT(*) FROM correspondences").fetchone()[0]}

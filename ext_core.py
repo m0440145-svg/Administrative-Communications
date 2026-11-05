@@ -60,6 +60,8 @@ def install(S):
     route, ApiError = S.route, S.ApiError
     f_text, f_int, now, audit = S.f_text, S.f_int, S.now, S.audit
     S.EXT_SCHEMAS.append(SCHEMA)
+    S.MIGRATIONS["user_prefs"] = {"columns": "TEXT", "email_on": "INTEGER NOT NULL DEFAULT 1", "sms_on": "INTEGER NOT NULL DEFAULT 0"}
+    LIST_COLUMNS = {"read", "party", "subject", "ref", "date", "priority", "status", "reply", "att", "sla", "actions"}
     state = {"fts": False, "model": None}
 
     # ───────────── تطبيع النص العربي (للبحث والتصنيف) ─────────────
@@ -90,9 +92,20 @@ def install(S):
         return d
 
     # ───────────── الإشعارات ─────────────
+    S.get_settings = get_settings
+    S.SETTING_DEFAULTS = DEFAULT_SETTINGS  # تُوسِّعها الوحدات الأخرى بمفاتيحها
+    S.SETTING_TEXT_KEYS = set()            # مفاتيح نصية حرة (الباقي أرقام)
+
     def notify(conn, user_id, kind, title, body=None, corr_id=None, dedupe=None):
-        conn.execute("INSERT OR IGNORE INTO notifications(user_id,kind,title,body,corr_id,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?)",
-                     (user_id, kind, title, body, corr_id, dedupe, now()))
+        cur = conn.execute("INSERT OR IGNORE INTO notifications(user_id,kind,title,body,corr_id,dedupe_key,created_at) VALUES(?,?,?,?,?,?,?)",
+                           (user_id, kind, title, body, corr_id, dedupe, now()))
+        if cur.rowcount:  # إشعار جديد فعلًا (لا تكرار) ← القنوات الإضافية: لحظي/بريد/SMS
+            for fn in S.EXT_NOTIFY:
+                try:
+                    fn(conn, user_id, kind, title, body, corr_id)
+                except Exception:
+                    traceback.print_exc()
+        return bool(cur.rowcount)
     S.notify = notify
 
     def ref_of(conn, cid):
@@ -196,7 +209,13 @@ def install(S):
         for a in alerts:
             for (uid,) in conn.execute("SELECT id FROM users WHERE role='admin' AND active=1").fetchall():
                 notify(conn, uid, "kpi_alert", "تنبيه انحراف أداء", a, None, dedupe=f"kpi:{a[:30]}:{today.isoformat()}")
-        return {"reminders": made, "alerts": alerts, "snapshot": snap}
+        extra = {}
+        for fn in S.EXT_TICK:  # تصعيد SLA، كشف الانحراف الإحصائي، التقارير المجدولة…
+            try:
+                extra[fn.__name__] = fn(conn)
+            except Exception:
+                traceback.print_exc()
+        return {"reminders": made, "alerts": alerts, "snapshot": snap, "extra": extra}
 
     def worker():
         while True:
@@ -225,7 +244,10 @@ def install(S):
         for k, v in ctx.body.items():
             if k not in DEFAULT_SETTINGS:
                 raise ApiError(400, f"إعداد غير معروف: {k}")
-            if not re.fullmatch(r"\d{1,5}(\.\d)?", str(v)):
+            if k in S.SETTING_TEXT_KEYS:
+                if not isinstance(v, str) or len(v) > 300:
+                    raise ApiError(400, f"قيمة غير صالحة: {k}")
+            elif not re.fullmatch(r"\d{1,5}(\.\d)?", str(v)):
                 raise ApiError(400, f"قيمة غير صالحة: {k}")
             ctx.conn.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
         audit(ctx, "settings_update", detail=json.dumps(ctx.body, ensure_ascii=False)[:200])
@@ -260,7 +282,8 @@ def install(S):
         if not c:
             return
         tags = " ".join(r[0] for r in conn.execute("SELECT t.name FROM corr_tags ct JOIN tags t ON t.id=ct.tag_id WHERE ct.corr_id=?", (cid,)))
-        att = " ".join(r[0] for r in conn.execute("SELECT text FROM att_text WHERE corr_id=?", (cid,)))
+        att = " ".join([r[0] for r in conn.execute("SELECT text FROM att_text WHERE corr_id=?", (cid,))] +
+                       [r[0] for r in conn.execute("SELECT text FROM notes WHERE corr_id=?", (cid,))])  # نص المرفقات النصية + التهميشات
         conn.execute("DELETE FROM corr_fts WHERE rowid=?", (cid,))
         conn.execute("INSERT INTO corr_fts(rowid,subject,summary,party,ref,tags,att) VALUES(?,?,?,?,?,?,?)",
                      (cid, norm(c["subject"]), norm(c["summary"]), norm(c["party"]),
@@ -335,28 +358,103 @@ def install(S):
             audit(ctx, "tags", "correspondence", cid, "، ".join(names) or "(حذف الوسوم)")
         return 200, {"tags": names}
 
+    # ───────────── البحث المركّب (AND / OR / NOT / "عبارة" / -استبعاد / أقواس) ─────────────
+    def parse_boolean(q):
+        """يحوّل استعلام المستخدم إلى تعبير FTS5 آمن. الأمثلة: عقد AND صيانة · "ورشة تدريب" · ميزانية -مسودة · (عقد OR مناقصة) NOT ملغى"""
+        parts = re.findall(r'"[^"]*"|\(|\)|[^\s()"]+', q)
+        out, prev = [], None   # prev: 'term' | 'op' | 'open' | 'close' | None
+        depth = 0
+
+        def push(tok, kind):
+            nonlocal prev
+            if kind in ("term", "open") and prev in ("term", "close"):
+                out.append("AND")  # بين كلمتين متجاورتين AND ضمنيًا
+            out.append(tok)
+            prev = kind
+
+        for p in parts:
+            up = p.upper()
+            if p == "(":
+                depth += 1
+                push("(", "open")
+            elif p == ")":
+                if depth == 0:
+                    continue
+                depth -= 1
+                if prev == "op":
+                    raise ApiError(400, "عامل بحث ناقص قبل القوس")
+                push(")", "close")
+            elif up in ("AND", "OR", "NOT"):
+                if prev in (None, "op", "open"):
+                    if up == "NOT":
+                        raise ApiError(400, "NOT يجب أن يسبقه مصطلح مطلوب، مثل: عقد NOT ملغى")
+                    continue  # AND/OR في البداية تُتجاهل
+                push(up, "op")
+            elif p.startswith("-") and len(p) > 1 and norm_tokens(p[1:]):
+                if prev in (None, "op", "open"):
+                    raise ApiError(400, "الاستبعاد (-كلمة) يلي كلمة مطلوبة، مثل: عقد -ملغى")
+                if prev in ("term", "close"):
+                    out.append("NOT")
+                    prev = "op"
+                push(f'"{" ".join(norm_tokens(p[1:]))}"', "term")
+            elif p.startswith('"'):
+                tk = norm_tokens(p.strip('"'))
+                if tk:
+                    push('"' + " ".join(tk) + '"', "term")
+            else:
+                tk = norm_tokens(p)
+                if tk:
+                    push(f'"{tk[0]}"*' if len(tk) == 1 else "(" + " AND ".join(f'"{t_}"*' for t_ in tk) + ")", "term")
+        while out and out[-1] in ("AND", "OR", "NOT"):
+            out.pop()
+        out += [")"] * depth
+        if not any(x not in ("AND", "OR", "NOT", "(", ")") for x in out):
+            raise ApiError(400, "اكتب كلمة للبحث")
+        return " ".join(out)
+
     @route("GET", r"/api/search")
     def search(ctx):
-        q = (ctx.query.get("q") or "").strip()[:120]
-        toks = norm_tokens(q)
-        if not toks:
+        q = (ctx.query.get("q") or "").strip()[:200]
+        if not norm_tokens(q):
             raise ApiError(400, "اكتب كلمة للبحث")
         vs, vp = S.visible_clause(ctx.user)
         limit = min(100, int(ctx.query["limit"])) if ctx.query.get("limit", "").isdigit() else 50
+        qy = ctx.query
+        extra, ep = [], []
+        for key, col in (("type", "type_id"), ("folder", "folder_id")):
+            if qy.get(key, "").isdigit():
+                extra.append(f"c.{col}=?"); ep.append(int(qy[key]))
+        for key in ("scope", "direction", "status", "priority"):
+            if qy.get(key):
+                extra.append(f"c.{key}=?"); ep.append(qy[key][:40])
+        if S.DATE_RE.match(qy.get("from", "")):
+            extra.append("c.doc_date>=?"); ep.append(qy["from"])
+        if S.DATE_RE.match(qy.get("to", "")):
+            extra.append("c.doc_date<=?"); ep.append(qy["to"])
+        if qy.get("tag"):
+            extra.append("EXISTS(SELECT 1 FROM corr_tags ctg JOIN tags tg ON tg.id=ctg.tag_id WHERE ctg.corr_id=c.id AND tg.name=?)"); ep.append(qy["tag"][:30])
+        ex = (" AND " + " AND ".join(extra)) if extra else ""
+        expr = None
         if state["fts"]:
-            match = " AND ".join(f'"{t}"*' for t in toks[:8])
-            rows = ctx.conn.execute(
-                "SELECT c.id, c.ref_no, c.subject, c.party, c.direction, c.scope, c.status, c.priority, c.doc_date, "
-                "snippet(corr_fts, -1, '«', '»', '…', 14) AS snip FROM corr_fts JOIN correspondences c ON c.id=corr_fts.rowid "
-                f"WHERE corr_fts MATCH ? AND {vs} ORDER BY rank LIMIT ?", [match] + vp + [limit]).fetchall()
+            expr = parse_boolean(q)
+            try:
+                rows = ctx.conn.execute(
+                    "SELECT c.id, c.ref_no, c.subject, c.party, c.direction, c.scope, c.status, c.priority, c.doc_date, "
+                    "snippet(corr_fts, -1, '«', '»', '…', 14) AS snip FROM corr_fts JOIN correspondences c ON c.id=corr_fts.rowid "
+                    f"WHERE corr_fts MATCH ? AND {vs}{ex} ORDER BY rank LIMIT ?", [expr] + vp + ep + [limit]).fetchall()
+            except Exception:  # تعبير غير صالح لـFTS5: نعود لـAND بسيط بدل الفشل
+                expr = " AND ".join(f'"{t_}"*' for t_ in norm_tokens(q)[:8])
+                rows = ctx.conn.execute(
+                    "SELECT c.id, c.ref_no, c.subject, c.party, c.direction, c.scope, c.status, c.priority, c.doc_date, "
+                    "snippet(corr_fts, -1, '«', '»', '…', 14) AS snip FROM corr_fts JOIN correspondences c ON c.id=corr_fts.rowid "
+                    f"WHERE corr_fts MATCH ? AND {vs}{ex} ORDER BY rank LIMIT ?", [expr] + vp + ep + [limit]).fetchall()
         else:
             like = "%" + q.replace("%", "").replace("_", "") + "%"
             rows = ctx.conn.execute(
                 "SELECT c.id, c.ref_no, c.subject, c.party, c.direction, c.scope, c.status, c.priority, c.doc_date, c.summary AS snip "
-                f"FROM correspondences c WHERE (c.subject LIKE ? OR c.summary LIKE ? OR c.party LIKE ?) AND {vs} ORDER BY c.id DESC LIMIT ?",
-                [like] * 3 + vp + [limit]).fetchall()
-        return 200, {"engine": "fts5" if state["fts"] else "like", "items": [dict(r) for r in rows]}
-
+                f"FROM correspondences c WHERE (c.subject LIKE ? OR c.summary LIKE ? OR c.party LIKE ?) AND {vs}{ex} ORDER BY c.id DESC LIMIT ?",
+                [like] * 3 + vp + ep + [limit]).fetchall()
+        return 200, {"engine": "fts5" if state["fts"] else "like", "query": expr, "items": [dict(r) for r in rows]}
     # ───────────── الاقتراحات الذكية (Naive Bayes على الأرشيف + قواعد صريحة) ─────────────
     TARGETS = ("type_id", "folder_id", "priority", "department_id")
 
@@ -589,8 +687,10 @@ def install(S):
     # ───────────── تفضيلات المستخدم والفلاتر المحفوظة ─────────────
     @route("GET", r"/api/me/prefs")
     def prefs_get(ctx):
-        r = ctx.conn.execute("SELECT theme, page_size FROM user_prefs WHERE user_id=?", (ctx.user["id"],)).fetchone()
-        return 200, dict(r) if r else {"theme": "auto", "page_size": 20}
+        r = ctx.conn.execute("SELECT theme, page_size, columns, email_on, sms_on FROM user_prefs WHERE user_id=?", (ctx.user["id"],)).fetchone()
+        d = dict(r) if r else {"theme": "auto", "page_size": 20, "columns": None, "email_on": 1, "sms_on": 0}
+        d["columns"] = json.loads(d["columns"]) if d["columns"] else None
+        return 200, d
 
     @route("PUT", r"/api/me/prefs")
     def prefs_put(ctx):
@@ -599,8 +699,16 @@ def install(S):
         size = f_int(b, "page_size", 5, 100) or 20
         if theme not in ("auto", "light", "dark"):
             raise ApiError(400, "سمة غير صالحة")
+        cols = b.get("columns")
+        if cols is not None and (not isinstance(cols, list) or not all(c in LIST_COLUMNS for c in cols)):
+            raise ApiError(400, "أعمدة غير صالحة")
         ctx.conn.execute("INSERT INTO user_prefs(user_id,theme,page_size) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
                          "theme=excluded.theme, page_size=excluded.page_size", (ctx.user["id"], theme, size))
+        if "columns" in b:
+            ctx.conn.execute("UPDATE user_prefs SET columns=? WHERE user_id=?", (json.dumps(cols) if cols else None, ctx.user["id"]))
+        for k in ("email_on", "sms_on"):
+            if k in b:
+                ctx.conn.execute(f"UPDATE user_prefs SET {k}=? WHERE user_id=?", (1 if b[k] else 0, ctx.user["id"]))
         return 200, {"theme": theme, "page_size": size}
 
     @route("GET", r"/api/me/filters")

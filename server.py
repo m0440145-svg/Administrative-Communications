@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("ACP_DATA", os.path.join(BASE, "data"))
 UPLOADS = os.path.join(DATA, "uploads")
+COLD = os.path.join(DATA, "cold")  # الأرشيف الوسيط (البارد) للمرفقات
 DB_PATH = os.path.join(DATA, "acp.db")
 STATIC = os.path.join(BASE, "static")
 
@@ -34,10 +35,10 @@ SESSION_HOURS = 8
 MAX_FAILED = 5
 LOCK_MINUTES = 15
 ALLOWED_EXT = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv",
-               ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".zip", ".msg", ".eml"}
+               ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".zip", ".msg", ".eml", ".mp4"}
 
 ROLES = ("admin", "manager", "clerk", "employee")
-STATUSES = ("new", "in_progress", "referred", "closed", "archived")
+STATUSES = ("draft", "new", "in_progress", "under_review", "awaiting_signature", "referred", "closed", "archived")
 URGENT = "(SELECT key FROM classifications WHERE is_urgent=1)"
 PERMS = {"create_external": "تسجيل المراسلات الخارجية", "export": "التصدير والتقارير",
          "see_all": "الاطلاع على كل المراسلات (ضمن درجة السرية)", "manage_all": "تحديث الحالة والإحالة لأي مراسلة"}
@@ -213,15 +214,21 @@ EXT_ENRICH = []    # fn(conn, user) تُثري بيانات المستخدم (م
 EXT_TASKS = []     # fn(ctx) -> list[dict] مهام إضافية
 EXT_VISIBLE = []   # fn(user, alias) -> (sql, params) شروط ظهور إضافية
 EXT_DETAIL = []    # fn(ctx, c) تُثري تفاصيل المراسلة
+EXT_LIST = []      # fn(ctx, items) تُثري عناصر القائمة (مثل حالة SLA والتثبيت)
+EXT_LOGIN = []     # fn(ctx, user_row) -> (status, obj) لإيقاف الدخول بخطوة إضافية، أو None للمتابعة
+EXT_NOTIFY = []    # fn(conn, user_id, kind, title, body, corr_id) بعد إدراج إشعار جديد (قنوات: بريد/SMS/لحظي)
+EXT_TICK = []      # fn(conn) مهام دورية (تصعيد SLA، كشف الانحراف، تقارير مجدولة)
 EXT_START = []     # fn() خلفيات تبدأ مع الخادم
 EXT_CLI = {}       # أوامر سطر الأوامر: python server.py <name> ...
 EXT_HANDLERS = {}  # أحداث: اسم -> [fn(ctx, **kw)]
 FILE_CODEC = {"enc": None, "dec": None}  # تشفير المرفقات عند الراحة (اختياري)
 MIGRATIONS = {
-    "correspondences": {"legal_hold": "INTEGER NOT NULL DEFAULT 0", "disposed_at": "TEXT", "legacy_ref": "TEXT"},
-    "attachments": {"removed_at": "TEXT", "enc": "INTEGER NOT NULL DEFAULT 0"},
+    "correspondences": {"legal_hold": "INTEGER NOT NULL DEFAULT 0", "disposed_at": "TEXT", "legacy_ref": "TEXT",
+                        "source": "TEXT NOT NULL DEFAULT 'manual'", "sla_due_at": "TEXT", "sla_hours": "REAL"},
+    "attachments": {"removed_at": "TEXT", "enc": "INTEGER NOT NULL DEFAULT 0", "cold": "INTEGER NOT NULL DEFAULT 0"},
     "audit_log": {"prev_hash": "TEXT", "hash": "TEXT"},
     "folders": {"parent_id": "INTEGER"},  # أرشيف متدرج: مجلد فرعي داخل مجلد
+    "users": {"totp_secret": "TEXT", "mfa_enabled": "INTEGER NOT NULL DEFAULT 0", "mfa_recovery": "TEXT"},
 }
 
 
@@ -273,6 +280,7 @@ def audit(ctx, action, entity=None, entity_id=None, detail=None):
 
 def init_db():
     os.makedirs(UPLOADS, exist_ok=True)
+    os.makedirs(COLD, exist_ok=True)
     conn = connect()
     conn.executescript(SCHEMA)
     conn.executescript(SCHEMA_INDEXES)
@@ -341,22 +349,25 @@ def eff_ids(u):
 def visible_clause(u, alias="c"):
     """شرط SQL يحدد المراسلات التي يحق للمستخدم رؤيتها (الدور + درجة السرية + الارتباط)."""
     a = alias
-    if u["role"] == "admin":
-        return "1=1", []
-    conf = f"{a}.conf_level<=?"
     eff = eff_ids(u)  # المستخدم + من فوّضه تفويضًا ساريًا
     ph = ",".join("?" * len(eff))
+    # المسودات لا يراها غير منشئها (والمدير)؛ هذا جزء من التحكم بالوصول بالسمات (ABAC)
+    conf = f"{a}.conf_level<=? AND ({a}.status<>'draft' OR {a}.created_by IN ({ph}))"
     # مجموعة المراسلات المرتبطة بالمستخدم تُحسب مرة واحدة عبر الفهارس (UNION) بدل فحص كل صف على حدة
     involved = (f"{a}.id IN (SELECT id FROM correspondences WHERE created_by IN ({ph}) "
                 f"UNION SELECT id FROM correspondences WHERE assigned_to IN ({ph}) "
                 f"UNION SELECT corr_id FROM transfers WHERE to_user IN ({ph}) OR from_user IN ({ph}) "
                 f"UNION SELECT corr_id FROM reply_users WHERE user_id IN ({ph}))")
-    p = [u["clearance"]]
+    p = [u["clearance"]] + eff
     ip = eff * 5
     for fn in EXT_VISIBLE:  # شروط إضافية (مثل خطوات مسار العمل)
         extra_sql, extra_p = fn(u, a)
         involved += f" OR {extra_sql}"
         ip += list(extra_p)
+    if u["role"] == "admin":
+        if u.get("strict_secret"):  # ABAC صارم: «سري للغاية» لا يراه المدير الشامل إلا إن كان طرفًا فيه
+            return f"({a}.conf_level<2 OR {involved})", ip
+        return "1=1", []
     if can(u, "see_all"):
         return f"({conf})", p
     if u["role"] == "manager" and u["department_id"]:
@@ -370,6 +381,11 @@ def get_visible(ctx, cid):
     sql, p = visible_clause(ctx.user)
     row = ctx.conn.execute(f"SELECT c.* FROM correspondences c WHERE c.id=? AND {sql}", [cid] + p).fetchone()
     if not row:
+        if not ctx.conn.in_transaction:  # محاولة وصول غير مصرح بها تُسجَّل (لا نسجّل داخل معاملة لأنها ستُلغى)
+            try:
+                audit(ctx, "access_denied", "correspondence", cid, "محاولة اطلاع على مراسلة غير متاحة")
+            except Exception:
+                pass
         raise ApiError(404, "المراسلة غير موجودة أو لا تملك صلاحية الاطلاع عليها")
     return row
 
@@ -511,6 +527,12 @@ class Ctx:
         return self._body
 
 
+class Stream:
+    """استجابة متدفقة (SSE): gen يُنتج بايتات حتى ينقطع الاتصال."""
+    def __init__(self, gen, headers=None):
+        self.gen, self.headers = gen, headers or {}
+
+
 class Raw:
     def __init__(self, status, body, headers):
         self.status, self.body, self.headers = status, body, headers
@@ -548,6 +570,14 @@ def login(ctx):
         audit(ctx, "login_failed")
         raise ApiError(401, "اسم المستخدم أو كلمة المرور غير صحيحة")
     ctx.conn.execute("UPDATE users SET failed_attempts=0, locked_until=NULL WHERE id=?", (u["id"],))
+    for fn in EXT_LOGIN:  # خطوة ثانية قبل إصدار الجلسة (مثل المصادقة الثنائية TOTP)
+        early = fn(ctx, u)
+        if early:
+            return early
+    return issue_session(ctx, u)
+
+
+def issue_session(ctx, u):
     token = secrets.token_urlsafe(32)
     exp = (datetime.now() + timedelta(hours=SESSION_HOURS)).strftime("%Y-%m-%d %H:%M:%S")
     ctx.conn.execute("DELETE FROM sessions WHERE expires_at<?", (now(),))
@@ -578,6 +608,8 @@ def public_user(u, full=False):
 def me(ctx):
     d = public_user(ctx.user, True)
     d["perms"] = sorted(PERMS) if ctx.user["role"] == "admin" else sorted(ctx.user.get("perms", ()))
+    d["ip"] = ctx.ip  # يُستخدم في العلامة المائية الديناميكية عند معاينة الوثائق
+    d["mfa_enabled"] = bool(ctx.user.get("mfa_enabled"))
     return 200, d
 
 
@@ -660,6 +692,9 @@ def build_filters(ctx):
                      "SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
     elif q.get("reply") == "replied":
         where.append("EXISTS(SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
+    if q.get("pinned") == "1":
+        where.append("EXISTS(SELECT 1 FROM pins pn WHERE pn.corr_id=c.id AND pn.user_id=?)")
+        p.append(u["id"])
     if q.get("tag"):
         where.append("EXISTS(SELECT 1 FROM corr_tags ctg JOIN tags tg ON tg.id=ctg.tag_id WHERE ctg.corr_id=c.id AND tg.name=?)")
         p.append(q["tag"][:30])
@@ -691,6 +726,9 @@ def list_corr(ctx):
     rows = ctx.conn.execute(
         f"SELECT {FIELDS}, {extra} {JOINS} WHERE {where} ORDER BY c.id {order} LIMIT ? OFFSET ?",
         [ctx.user["id"]] + p + [size, (page - 1) * size]).fetchall()
+    items = [dict(r) for r in rows]
+    for fn in EXT_LIST:
+        fn(ctx, items)
     # مؤشرات الصفحة: تتبع النطاق والاتجاه فقط وتتجاهل بقية الفلاتر
     vs, vp = visible_clause(ctx.user)
     base, bp = [vs], list(vp)
@@ -706,7 +744,7 @@ def list_corr(ctx):
            "unread": n("AND NOT EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)", [ctx.user["id"]]),
            "in_progress": n("AND c.status='in_progress'"),
            "urgent": n(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')")}
-    return 200, {"total": total, "page": page, "size": size, "kpi": kpi, "items": [dict(r) for r in rows]}
+    return 200, {"total": total, "page": page, "size": size, "kpi": kpi, "items": items}
 
 
 @route("POST", r"/api/correspondences/read")
@@ -779,6 +817,9 @@ def create_corr(ctx):
         if uid not in assignees:
             assignees.append(uid)
     assigned = assignees[0] if assignees else None  # المسؤول الأول
+    is_draft = bool(b.get("draft"))  # مسودة: لا إسناد ولا إشعارات ولا يراها غير منشئها حتى تُقدَّم
+    if is_draft:
+        assignees, assigned = [], None
     parent = f_int(b, "parent_id")
     folder_id, type_id = f_int(b, "folder_id"), f_int(b, "type_id")
     for table, val in (("folders", folder_id), ("ctypes", type_id)):
@@ -818,7 +859,7 @@ def create_corr(ctx):
         n = (r[0] if r else 0) + 1
         conn.execute("INSERT INTO counters(k,n) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET n=excluded.n", (key, n))
         ref = f"{key}-{n:05d}"
-        status = "referred" if assigned else "new"
+        status = "draft" if is_draft else ("referred" if assigned else "new")
         cur = conn.execute(
             "INSERT INTO correspondences(ref_no,scope,direction,subject,summary,party,party_ref,party_dept_id,doc_date,"
             "category,priority,conf_level,status,department_id,assigned_to,due_date,parent_id,created_by,created_at,updated_at,"
@@ -845,7 +886,7 @@ def create_corr(ctx):
         audit(ctx, "create", "correspondence", cid, ref)
     row = conn.execute("SELECT * FROM correspondences WHERE id=?", (cid,)).fetchone()
     fire_webhooks("correspondence.created", hook_payload(row))
-    emit("corr_created", ctx, cid=cid, ref=ref, assignees=assignees, reply_users=reply_ids, parent=parent)
+    emit("corr_created", ctx, cid=cid, ref=ref, assignees=assignees, reply_users=[] if is_draft else reply_ids, parent=parent)
     return 201, {"id": cid, "ref_no": ref}
 
 
@@ -917,7 +958,8 @@ def link_reply(ctx):
 def update_corr(ctx):
     cid = int(ctx.params["id"])
     c = get_visible(ctx, cid)
-    if not can_manage(ctx, c):
+    own_draft = c["status"] == "draft" and c["created_by"] in eff_ids(ctx.user)  # منشئ المسودة يقدّمها بنفسه
+    if not own_draft and not can_manage(ctx, c):
         raise ApiError(403, "لا تملك صلاحية تعديل هذه المراسلة")
     b, conn = ctx.body, ctx.conn
     sets, p, notes = [], [], []
@@ -1071,7 +1113,7 @@ def download(ctx):
     get_visible(ctx, a["corr_id"])
     if a["removed_at"]:
         raise ApiError(410, "أُتلف هذا المرفق وفق سياسة الاحتجاز (بقي سجله فقط)")
-    path = os.path.join(UPLOADS, a["stored_name"])
+    path = os.path.join(COLD if a["cold"] else UPLOADS, a["stored_name"])
     if not os.path.isfile(path):
         raise ApiError(404, "الملف مفقود من التخزين")
     with open(path, "rb") as f:
@@ -1533,7 +1575,7 @@ def health(ctx):
 
 # ───────────────────────── خادم HTTP ─────────────────────────
 SEC_HEADERS = {
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob:; frame-src blob:; media-src blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
 }
@@ -1585,8 +1627,10 @@ class Handler(BaseHTTPRequestHandler):
         if a.startswith("Bearer "):
             r = conn.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
                              "WHERE s.token_hash=? AND s.expires_at>? AND u.active=1", (sha(a[7:]), now())).fetchone()
-            return dict(r) if r else None
-        for fn in EXT_AUTH:  # مصادقة بديلة (SSO عبر وسيط موثوق)
+            if r:
+                return dict(r)
+            # ليست جلسة: قد تكون JWT (OAuth2 client-credentials) فنتركها لمصادقات EXT_AUTH
+        for fn in EXT_AUTH:  # مصادقة بديلة (SSO عبر وسيط موثوق، JWT)
             u = fn(self, conn)
             if u:
                 return u
@@ -1625,6 +1669,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(403, {"error": "لا تملك الصلاحية"})
                 ctx = Ctx(self, conn, user, m.groupdict(), query)
                 res = fn(ctx)
+                if isinstance(res, Stream):
+                    self.send_response(200)
+                    for k, v in {**SEC_HEADERS, "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store", **res.headers}.items():
+                        self.send_header(k, v)
+                    self.end_headers()
+                    try:
+                        for chunk in res.gen:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        pass
+                    return
                 if isinstance(res, Raw):
                     return self.send(res.status, res.body, res.headers)
                 return self.send_json(*res)
@@ -1644,7 +1700,7 @@ def load_extensions():
     """تحميل الوحدات الملحقة (كل وحدة تضيف جداولها ومساراتها دون المساس بالنواة)."""
     import importlib
     me = sys.modules[__name__]
-    for name in ("ext_core", "ext_workflow", "ext_gov"):
+    for name in ("ext_core", "ext_workflow", "ext_gov", "ext_docs", "ext_ops", "ext_sec"):
         importlib.import_module(name).install(me)
 
 
@@ -1663,7 +1719,7 @@ def main():
     if cert and key:  # تشفير الاتصال (HTTPS) مباشرة؛ الأفضل وكيل عكسي في الإنتاج
         import ssl
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3 if os.environ.get("ACP_TLS_MIN") == "1.3" else ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(cert, key)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         scheme = "https"

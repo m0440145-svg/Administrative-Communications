@@ -164,7 +164,8 @@ class ExtTest(unittest.TestCase):
     def test_04_prefs_and_filters(self):
         t = self.tok["emp1"]
         self.assertEqual(call("PUT", "/api/me/prefs", {"theme": "dark", "page_size": 50}, t)[0], 200)
-        self.assertEqual(call("GET", "/api/me/prefs", token=t)[1], {"theme": "dark", "page_size": 50})
+        prefs = call("GET", "/api/me/prefs", token=t)[1]
+        self.assertEqual((prefs["theme"], prefs["page_size"]), ("dark", 50))
         self.assertEqual(call("PUT", "/api/me/prefs", {"theme": "neon"}, t)[0], 400)
         s, f, _ = call("POST", "/api/me/filters", {"name": "عاجل غير مقروء", "kind": "list", "query": "priority=urgent&read=unread"}, t)
         self.assertEqual(s, 201)
@@ -340,6 +341,11 @@ class ExtTest(unittest.TestCase):
         self.assertEqual(r3.returncode, 1)
         # تلاعب بالسجل يُكتشف (حذف صف من المنتصف)
         mid = self.dbq("SELECT id FROM audit_log WHERE hash IS NOT NULL ORDER BY id LIMIT 1 OFFSET 5")[0][0]
+        with self.assertRaises(sqlite3.IntegrityError):  # السجل غير قابل للحذف/التعديل حتى بصلاحية الكتابة المباشرة
+            self.dbq("DELETE FROM audit_log WHERE id=?", (mid,))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.dbq("UPDATE audit_log SET detail='x' WHERE id=?", (mid,))
+        self.dbq("DROP TRIGGER audit_no_delete")  # مهاجم بصلاحية مدير القاعدة يعطّل المحفّز: السلسلة تكشف التلاعب مع ذلك
         self.dbq("DELETE FROM audit_log WHERE id=?", (mid,))
         v2 = call("GET", "/api/admin/audit/verify", token=self.admin)[1]
         self.assertFalse(v2["ok"])

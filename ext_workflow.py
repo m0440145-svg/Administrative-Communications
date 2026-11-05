@@ -47,6 +47,7 @@ def install(S):
     route, ApiError = S.route, S.ApiError
     f_text, f_int, f_date, now, audit = S.f_text, S.f_int, S.f_date, S.now, S.audit
     S.EXT_SCHEMAS.append(SCHEMA)
+    S.MIGRATIONS["wf_steps"] = {"stage": "INTEGER NOT NULL DEFAULT 0"}
 
     def init(conn):
         if conn.execute("SELECT COUNT(*) FROM workflows").fetchone()[0] == 0:
@@ -70,6 +71,8 @@ def install(S):
                 pass
         with open(path) as f:
             return f.read().strip().encode()
+
+    S.signing_key = signing_key
 
     def doc_state(conn, cid):
         c = conn.execute("SELECT ref_no, subject, direction, scope, priority, party, doc_date FROM correspondences WHERE id=?", (cid,)).fetchone()
@@ -99,6 +102,8 @@ def install(S):
     def reauth(ctx):
         if not S.verify_password(str(ctx.body.get("password", "")), ctx.user["password_hash"]):
             raise ApiError(400, "كلمة المرور غير صحيحة — يلزم إدخالها لتأكيد التوقيع")
+        if hasattr(S, "require_second_factor"):
+            S.require_second_factor(ctx)
 
     # ───────────── التفويض ─────────────
     def enrich(conn, u):
@@ -166,6 +171,17 @@ def install(S):
             if kind not in ("review", "approve"):
                 raise ApiError(400, "نوع الخطوة: مراجعة أو اعتماد")
             step = {"name": name, "kind": kind, "days": f_int(s, "days", 1, 60) or 3}
+            if s.get("stage") not in (None, ""):
+                step["stage"] = f_int(s, "stage", 1, 10)  # نفس رقم المرحلة = تنفيذ متوازٍ
+            w = s.get("when")
+            if w:
+                if not isinstance(w, dict) or set(w) - {"priority_in", "scope", "direction"}:
+                    raise ApiError(400, "شرط الخطوة غير صالح")
+                if w.get("priority_in") is not None and not (isinstance(w["priority_in"], list) and all(isinstance(x, str) for x in w["priority_in"])):
+                    raise ApiError(400, "شرط التصنيف غير صالح")
+                if w.get("scope") not in (None, "external", "internal") or w.get("direction") not in (None, "incoming", "outgoing"):
+                    raise ApiError(400, "شرط النطاق/الاتجاه غير صالح")
+                step["when"] = {k: v for k, v in w.items() if v}
             if s.get("user_id"):
                 step["user_id"] = f_int(s, "user_id", required=True)
             elif s.get("role") in ("manager", "clerk", "admin"):
@@ -232,6 +248,23 @@ def install(S):
         conn.execute("UPDATE wf_steps SET status='pending', due_date=? WHERE id=?", (due, step["id"]))
         S.notify(conn, step["user_id"], "wf_step", f"مطلوب إجراؤك: {step['name']}", corr_ref, step["corr_id"])
 
+    def set_phase_status(conn, cid):
+        """حالة المراسلة تتبع المرحلة الجارية: بانتظار التوقيع (اعتماد) أو قيد المراجعة (مراجعة)."""
+        kinds = {r[0] for r in conn.execute("SELECT kind FROM wf_steps WHERE corr_id=? AND status='pending'", (cid,))}
+        new = "awaiting_signature" if "approve" in kinds else "under_review" if "review" in kinds else None
+        if new:
+            conn.execute("UPDATE correspondences SET status=?, updated_at=? WHERE id=? AND status NOT IN('closed','archived')", (new, now(), cid))
+
+    def when_ok(step, c):
+        w = step.get("when") or {}
+        if w.get("priority_in") and c["priority"] not in w["priority_in"]:
+            return False
+        if w.get("scope") and c["scope"] != w["scope"]:
+            return False
+        if w.get("direction") and c["direction"] != w["direction"]:
+            return False
+        return True
+
     @route("POST", r"/api/correspondences/(?P<id>\d+)/workflow")
     def wf_start(ctx):
         cid = int(ctx.params["id"])
@@ -245,7 +278,17 @@ def install(S):
             raise ApiError(400, "يوجد مسار عمل جارٍ لهذه المراسلة")
         if c["status"] in ("closed", "archived"):
             raise ApiError(400, "المراسلة مغلقة أو مؤرشفة")
-        steps = json.loads(wf["steps"])
+        all_steps = json.loads(wf["steps"])
+        # الإحالة الشرطية: تُستبعد الخطوات التي لا ينطبق شرطها على هذه المراسلة (التصنيف/النطاق/الاتجاه)
+        steps = [s for s in all_steps if when_ok(s, c)]
+        if not steps:
+            raise ApiError(400, "لا توجد خطوات في هذا المسار تنطبق على المراسلة (شروط الخطوات)")
+        # المراحل: الخطوات ذات رقم المرحلة نفسه تعمل بالتوازي؛ والخطوة بلا رقم تتبع المرحلة السابقة تسلسليًا
+        stages, last = [], 0
+        for s in steps:
+            last = s["stage"] if s.get("stage") else last + 1
+            stages.append(last)
+        rank = {v: i for i, v in enumerate(sorted(set(stages)))}
         users = []
         for s in steps:
             u = resolve_user(ctx.conn, s, c)
@@ -257,16 +300,14 @@ def install(S):
             ctx.conn.execute("DELETE FROM wf_instances WHERE corr_id=?", (cid,))
             ctx.conn.execute("INSERT INTO wf_instances(corr_id,workflow_id,name,close_on_finish,started_by,started_at) VALUES(?,?,?,?,?,?)",
                              (cid, wf["id"], wf["name"], wf["close_on_finish"], ctx.user["id"], now()))
-            ids = []
-            for i, (s, u) in enumerate(zip(steps, users)):
-                cur = ctx.conn.execute("INSERT INTO wf_steps(corr_id,idx,name,kind,user_id,days) VALUES(?,?,?,?,?,?)",
-                                       (cid, i, s["name"], s["kind"], u["id"], s["days"]))
-                ids.append(cur.lastrowid)
-            first = ctx.conn.execute("SELECT * FROM wf_steps WHERE id=?", (ids[0],)).fetchone()
-            activate(ctx.conn, dict(first), c["ref_no"])
-            ctx.conn.execute("UPDATE correspondences SET status=CASE WHEN status='new' THEN 'in_progress' ELSE status END, updated_at=? WHERE id=?", (now(), cid))
-            audit(ctx, "workflow_start", "correspondence", cid, wf["name"])
-        return 201, {"ok": True}
+            for i, (s, u, stg) in enumerate(zip(steps, users, stages)):
+                ctx.conn.execute("INSERT INTO wf_steps(corr_id,idx,name,kind,user_id,days,stage) VALUES(?,?,?,?,?,?,?)",
+                                 (cid, i, s["name"], s["kind"], u["id"], s["days"], rank[stg]))
+            for st in ctx.conn.execute("SELECT * FROM wf_steps WHERE corr_id=? AND stage=0", (cid,)).fetchall():
+                activate(ctx.conn, dict(st), c["ref_no"])
+            set_phase_status(ctx.conn, cid)
+            audit(ctx, "workflow_start", "correspondence", cid, wf["name"] + (f" ({len(all_steps) - len(steps)} خطوة استُبعدت بالشرط)" if len(steps) != len(all_steps) else ""))
+        return 201, {"ok": True, "steps": len(steps)}
 
     @route("POST", r"/api/wf/steps/(?P<id>\d+)/decide")
     def wf_decide(ctx):
@@ -280,7 +321,7 @@ def install(S):
         if decision not in ok_decisions:
             raise ApiError(400, "قرار غير صالح لهذه الخطوة")
         if st["kind"] == "approve":
-            reauth(ctx)  # إعادة إدخال كلمة المرور قبل أي توقيع
+            reauth(ctx)  # إعادة إدخال كلمة المرور (ورمز TOTP إن كانت المصادقة الثنائية مفعّلة) قبل أي توقيع
         if decision == "reject" and not comment:
             raise ApiError(400, "اكتب سبب الرفض")
         on_behalf = st["user_id"] if st["user_id"] != ctx.user["id"] else None
@@ -292,23 +333,29 @@ def install(S):
             audit(ctx, "workflow_step", "correspondence", st["corr_id"], f"{st['name']}: {decision}" + (f" — {comment}" if comment else ""))
             inst = ctx.conn.execute("SELECT * FROM wf_instances WHERE corr_id=?", (st["corr_id"],)).fetchone()
             if decision == "reject":
-                ctx.conn.execute("UPDATE wf_steps SET status='skipped' WHERE corr_id=? AND status='waiting'", (st["corr_id"],))
+                ctx.conn.execute("UPDATE wf_steps SET status='skipped' WHERE corr_id=? AND status IN('waiting','pending')", (st["corr_id"],))
                 ctx.conn.execute("UPDATE wf_instances SET status='rejected', finished_at=? WHERE corr_id=?", (now(), st["corr_id"]))
+                ctx.conn.execute("UPDATE correspondences SET status='in_progress', updated_at=? WHERE id=? AND status IN('under_review','awaiting_signature')", (now(), st["corr_id"]))
                 for uid in {inst["started_by"], c["created_by"]} - {ctx.user["id"]}:
                     S.notify(ctx.conn, uid, "wf_rejected", f"رُفضت المراسلة {c['ref_no']} في «{st['name']}»", comment, st["corr_id"])
             else:
-                nxt = ctx.conn.execute("SELECT * FROM wf_steps WHERE corr_id=? AND status='waiting' ORDER BY idx LIMIT 1", (st["corr_id"],)).fetchone()
-                if nxt:
-                    activate(ctx.conn, dict(nxt), c["ref_no"])
+                still = ctx.conn.execute("SELECT 1 FROM wf_steps WHERE corr_id=? AND stage=? AND status='pending'", (st["corr_id"], st["stage"])).fetchone()
+                if still:  # مرحلة متوازية: تنتظر بقية المسؤولين عن المرحلة نفسها
+                    set_phase_status(ctx.conn, st["corr_id"])
                 else:
-                    ctx.conn.execute("UPDATE wf_instances SET status='done', finished_at=? WHERE corr_id=?", (now(), st["corr_id"]))
-                    if inst["close_on_finish"]:
-                        ctx.conn.execute("UPDATE correspondences SET status='closed', updated_at=? WHERE id=?", (now(), st["corr_id"]))
-                    audit(ctx, "workflow_done", "correspondence", st["corr_id"], inst["name"])
-                    for uid in {inst["started_by"], c["created_by"]} - {ctx.user["id"]}:
-                        S.notify(ctx.conn, uid, "wf_done", f"اكتمل مسار العمل للمراسلة {c['ref_no']}", inst["name"], st["corr_id"])
+                    nxt = ctx.conn.execute("SELECT MIN(stage) FROM wf_steps WHERE corr_id=? AND status='waiting'", (st["corr_id"],)).fetchone()[0]
+                    if nxt is not None:
+                        for s2 in ctx.conn.execute("SELECT * FROM wf_steps WHERE corr_id=? AND stage=? AND status='waiting'", (st["corr_id"], nxt)).fetchall():
+                            activate(ctx.conn, dict(s2), c["ref_no"])
+                        set_phase_status(ctx.conn, st["corr_id"])
+                    else:
+                        ctx.conn.execute("UPDATE wf_instances SET status='done', finished_at=? WHERE corr_id=?", (now(), st["corr_id"]))
+                        ctx.conn.execute("UPDATE correspondences SET status=CASE WHEN ? THEN 'closed' ELSE 'in_progress' END, updated_at=? WHERE id=? AND status NOT IN('closed','archived')",
+                                         (1 if inst["close_on_finish"] else 0, now(), st["corr_id"]))
+                        audit(ctx, "workflow_done", "correspondence", st["corr_id"], inst["name"])
+                        for uid in {inst["started_by"], c["created_by"]} - {ctx.user["id"]}:
+                            S.notify(ctx.conn, uid, "wf_done", f"اكتمل مسار العمل للمراسلة {c['ref_no']}", inst["name"], st["corr_id"])
         return 200, {"ok": True}
-
     @route("DELETE", r"/api/correspondences/(?P<id>\d+)/workflow")
     def wf_cancel(ctx):
         cid = int(ctx.params["id"])
