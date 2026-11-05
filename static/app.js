@@ -4,7 +4,7 @@
 
 const L = {
   status: { new: "جديد", in_progress: "جارٍ", referred: "محال", closed: "منجز", archived: "مؤرشف" },
-  priority: { normal: "طبيعي", high: "هام", urgent: "عاجل" },
+  priority: {}, // تُحمَّل من الخادم (تصنيفات الوثيقة) في loadRefs
   conf: ["عادي", "سري", "سري للغاية"],
   role: { admin: "مدير النظام", manager: "مدير إدارة", clerk: "مكتب الصادر والوارد", employee: "موظف" },
   scope: { external: "خارجي", internal: "داخلي" },
@@ -15,7 +15,7 @@ const L = {
     apikey_revoke: "إلغاء مفتاح API", webhook_create: "إنشاء Webhook", webhook_delete: "حذف Webhook", integrity_failure: "فشل سلامة ملف" },
 };
 
-const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [] };
+const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {} };
 
 // ───────── أدوات ─────────
 function h(tag, attrs, ...kids) {
@@ -69,6 +69,15 @@ const statusPill = (s) => pill(s, L.status[s] || s);
 const typeLabel = (c) => `${L.direction[c.direction]} ${L.scope[c.scope]}`;
 const deptName = (id) => (state.depts.find((d) => d.id === id) || {}).name || "—";
 const isStaff = () => ["admin", "manager", "clerk"].includes(state.user.role);
+const can = (p) => state.user.role === "admin" || (state.user.perms || []).includes(p);
+const activeDepts = () => state.depts.filter((d) => d.active);
+const deptOptions = () => Object.fromEntries(activeDepts().map((d) => [d.id, d.name]));
+function prioPill(key) {
+  const c = state.clsMap[key];
+  const el = pill("", c ? c.label : key);
+  if (c) { el.style.background = c.color + "22"; el.style.color = c.color; el.style.fontWeight = "600"; el.style.border = "1px solid " + c.color + "55"; }
+  return el;
+}
 
 function logoutLocal() {
   state.token = null; state.user = null;
@@ -86,11 +95,13 @@ const NAV = [
   ["#/list?direction=outgoing", "الصادر"],
   ["#/list", "كل المراسلات"],
 ];
-const ADMIN_NAV = [["sep", "الإدارة"], ["#/admin/users", "المستخدمون والإدارات"], ["#/admin/audit", "سجل التدقيق"], ["#/admin/integration", "التكامل (API)"]];
+const REPORT_NAV = [["#/reports", "التقارير"]];
+const ADMIN_NAV = [["sep", "لوحة التحكم"], ["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/classes", "التصنيفات والخصوصية"],
+  ["#/admin/perms", "الصلاحيات"], ["#/admin/audit", "سجل التدقيق"], ["#/admin/integration", "التكامل (API)"]];
 
 function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
-  const items = [...NAV, ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
+  const items = [...NAV, ...(isStaff() || can("export") ? REPORT_NAV : []), ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
     href === "sep" ? h("div", { class: "sep" }, label)
       : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?")) ? "active" : "" },
         label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null));
@@ -158,7 +169,7 @@ async function dashboardView() {
   });
   return [h("h2", {}, "لوحة المعلومات"),
     h("div", { class: "grid g4" }, stat(d.total, "إجمالي المراسلات", "#/list"), stat(d.my_tasks, "إحالات بانتظارك", "#/tasks"),
-      stat(d.overdue, "متأخرة عن موعدها", "#/list?overdue=1", true), stat(d.urgent_open, "عاجلة مفتوحة", "#/list?priority=urgent")),
+      stat(d.overdue, "متأخرة عن موعدها", "#/list?overdue=1", true), stat(d.urgent_open, "عاجلة مفتوحة", "#/list?priority=urgent_all")),
     h("div", { class: "grid g4", }, typeRows),
     h("div", { class: "grid g2" },
       h("div", { class: "card" }, h("h3", {}, "الحركة الشهرية (آخر 6 أشهر)"), bars,
@@ -178,14 +189,13 @@ function corrTable(items, compact) {
     h("tbody", {}, items.map((c) => h("tr", {},
       h("td", {}, h("a", { href: "#/c/" + c.id, class: "ltr" }, c.ref_no)),
       h("td", {}, typeLabel(c)),
-      h("td", {}, h("a", { href: "#/c/" + c.id }, c.subject), " ", c.priority !== "normal" ? pill(c.priority, L.priority[c.priority]) : null, c.conf_level ? pill("conf" + c.conf_level, L.conf[c.conf_level]) : null),
+      h("td", {}, h("a", { href: "#/c/" + c.id }, c.subject), " ", c.priority !== "normal" ? prioPill(c.priority) : null, c.conf_level ? pill("conf" + c.conf_level, L.conf[c.conf_level]) : null),
       compact ? null : h("td", {}, c.party),
       h("td", { class: "ltr" }, fmtDate(c.doc_date)),
       h("td", {}, statusPill(c.status)),
       compact ? null : h("td", {}, c.assignee_name || "—"))))));
 }
 
-const PRIO_ICON = { urgent: "❗", high: "⚑", normal: "✋" };
 
 async function listView(q) {
   const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size"];
@@ -226,7 +236,7 @@ async function listView(q) {
         dd("scope", "نوع البريد", { "": "داخلي وخارجي", ...L.scope }), dd("dept", "الإدارة", depts),
         h("input", { type: "date", name: "from", "aria-label": "من تاريخ", value: q.get("from") || "", onchange: apply }),
         h("input", { type: "date", name: "to", "aria-label": "إلى تاريخ", value: q.get("to") || "", onchange: apply }),
-        isStaff() ? h("button", { type: "button", class: "btn ghost sm", onclick: () => exportCsv(params) }, "تصدير CSV") : null)));
+        can("export") ? h("button", { type: "button", class: "btn ghost sm", onclick: () => exportCsv(params) }, "تصدير CSV") : null)));
 
   const k = data.kpi;
   const kpi = (cls, icon, n, label, href) => h("a", { class: "kpi " + cls, href }, h("div", { class: "ico" }, icon), h("div", {}, h("div", { class: "n" }, n), h("div", { class: "l" }, label)));
@@ -234,7 +244,7 @@ async function listView(q) {
     kpi("k-total", "📥", k.total, "إجمالي " + (dir === "outgoing" ? "الصادر" : dir === "incoming" ? "الوارد" : "المراسلات"), link({})),
     kpi("k-unread", "✉️", k.unread, "غير مقروءة", link({ read: "unread" })),
     kpi("k-prog", "🕓", k.in_progress, "قيد المعالجة", link({ status: "in_progress" })),
-    kpi("k-urgent", "⏰", k.urgent, "عاجلة", link({ priority: "urgent" })));
+    kpi("k-urgent", "⏰", k.urgent, "عاجلة", link({ priority: "urgent_all" })));
 
   // التحديد الجماعي
   const sel$ = new Set();
@@ -261,7 +271,7 @@ async function listView(q) {
       h("td", { class: "subj" }, h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null),
       h("td", { class: "ltr nowrap" }, c.ref_no),
       h("td", { class: "nowrap" }, c.created_at.slice(0, 10).replaceAll("-", "/"), h("div", { class: "small muted" }, timeOf(c.created_at))),
-      h("td", {}, pill("pr-" + c.priority, `${PRIO_ICON[c.priority]} ${L.priority[c.priority]}`)),
+      h("td", {}, prioPill(c.priority)),
       h("td", {}, statusPill(c.status)),
       h("td", { class: "nowrap" }, c.att_count ? `📎 ${c.att_count}` : "—"),
       h("td", { class: "acts" },
@@ -314,7 +324,7 @@ async function tasksView() {
         const note = h("input", { placeholder: "ملاحظة التنفيذ (اختياري)" });
         return h("div", { class: "card" },
           h("div", { class: "row" }, h("a", { href: "#/c/" + t.id, class: "ltr" }, t.ref_no), h("strong", {}, t.subject),
-            t.priority !== "normal" ? pill(t.priority, L.priority[t.priority]) : null, t.conf_level ? pill("conf" + t.conf_level, L.conf[t.conf_level]) : null),
+            t.priority !== "normal" ? prioPill(t.priority) : null, t.conf_level ? pill("conf" + t.conf_level, L.conf[t.conf_level]) : null),
           h("p", { class: "muted small" }, `من: ${t.from_name} — ${fmtDT(t.transferred_at)}`, t.transfer_due ? ` — الاستحقاق: ${t.transfer_due}` : ""),
           t.instruction ? h("p", {}, "التوجيه: ", t.instruction) : null,
           h("div", { class: "row" }, note, h("button", { class: "btn", onclick: async () => {
@@ -328,13 +338,36 @@ async function tasksView() {
 function newView(q) {
   const parent = q.get("parent");
   const err = h("div", { class: "err", role: "alert" });
-  const canExternal = state.user.role !== "employee";
-  const scopes = canExternal ? { ...L.scope } : { internal: "داخلي" };
-  const form = h("form", { class: "card", onsubmit: async (e) => {
+  const canExternal = can("create_external");
+  let dir = q.get("direction") === "outgoing" ? "outgoing" : "incoming";
+  const dyn = []; // عناصر تتغير نصوصها مع الاتجاه: [عنصر, نص الوارد, نص الصادر]
+  const dl = (inText, outText, cls) => { const el = h("span", { class: cls || "lb" }); dyn.push([el, inText, outText]); return el; };
+  const title = h("h2", {});
+  const syncDir = () => {
+    title.textContent = parent ? "تسجيل رد على مراسلة" : dir === "incoming" ? "إنشاء مراسلة واردة" : "إنشاء مراسلة صادرة";
+    dyn.forEach(([el, a, b]) => (el.textContent = dir === "incoming" ? a : b));
+  };
+  const radio = (name, value, text, checked, onchange) => h("label", { class: "opt" },
+    h("input", { type: "radio", name, value, checked, onchange }), text);
+  const row = (label, control, req) => {
+    if (control.tagName && ["INPUT", "SELECT", "TEXTAREA"].includes(control.tagName)) control.id = control.id || "fld" + ++fieldSeq;
+    const lb = typeof label === "string" ? h("label", { class: "lb" + (req ? " req" : ""), for: control.id }, label)
+      : (label.classList.add("lb"), req && label.classList.add("req"), label);
+    return h("div", { class: "frow2" }, lb, control);
+  };
+  const deptOpts = { "": "—", ...deptOptions() };
+
+  // تصنيف الوثيقة من جدول التصنيفات؛ تُخفى التصنيفات التي تفوق درجة سريتها صلاحية المستخدم
+  const classes = h("div", { class: "classes", role: "group", "aria-label": "تصنيف الوثيقة" },
+    state.cls.filter((c) => c.conf_level <= state.user.clearance).map((c) => radio("priority", c.key, c.label, c.key === "normal")));
+
+  const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
-    const body = {};
-    for (const el of form.elements) if (el.name && el.value !== "") body[el.name] = el.value;
-    ["conf_level"].forEach((k) => body[k] != null && (body[k] = Number(body[k])));
+    const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
+    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "category", "department_id", "party_dept_id", "assigned_to",
+      "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
+      const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
+    }
     if (parent) body.parent_id = Number(parent);
     try {
       const r = await api("/correspondences", { method: "POST", body });
@@ -343,24 +376,34 @@ function newView(q) {
       toast("تم التسجيل برقم " + r.ref_no); location.hash = "#/c/" + r.id;
     } catch (ex) { err.textContent = ex.message; }
   } },
-    h("div", { class: "form-grid" },
-      f("الاتجاه (وارد / صادر)", sel("direction", L.direction, q.get("direction") || "incoming", { required: true }), true),
-      f("نوع البريد (داخلي / خارجي)", sel("scope", scopes, q.get("scope") || (canExternal ? "external" : "internal"), { required: true }), true),
-      f("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, value: q.get("subject") || "" }), true, "span2"),
-      f("الجهة (المرسِل / المرسَل إليه)", h("input", { name: "party", required: true, maxlength: 200 }), true),
-      f("رقم مرجع الجهة", h("input", { name: "party_ref", maxlength: 100 })),
-      f("تاريخ المراسلة", h("input", { type: "date", name: "doc_date", required: true, value: today() }), true),
-      f("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
-      f("الأولوية", sel("priority", L.priority, "normal")),
-      f("درجة السرية", sel("conf_level", Object.fromEntries(L.conf.slice(0, state.user.clearance + 1).map((v, i) => [i, v])), 0)),
-      f("التصنيف", h("input", { name: "category", maxlength: 60, placeholder: "مثال: عقود، شكاوى، تعاميم" })),
-      isStaff() && state.user.role !== "manager" ? f("الإدارة المسؤولة", sel("department_id", Object.fromEntries(state.depts.map((d) => [d.id, d.name])), state.user.department_id)) : null,
-      f("الإدارة المعنية (للمراسلات الداخلية)", sel("party_dept_id", { "": "—", ...Object.fromEntries(state.depts.map((d) => [d.id, d.name])) }, "")),
-      f("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, "")),
-      f("الملخص", h("textarea", { name: "summary", maxlength: 5000 }), false, "span2"),
-      f("المرفق (PDF, Office, صور… حتى 20MB)", h("input", { type: "file", name: "file" }), false, "span2")),
-    err, h("button", { class: "btn" }, "تسجيل المراسلة"));
-  return [h("h2", {}, parent ? "تسجيل رد على مراسلة" : "تسجيل مراسلة جديدة"), form];
+    row(h("span", {}, "الاتجاه"), h("div", { class: "classes" },
+      radio("dir", "incoming", "وارد", dir === "incoming", () => { dir = "incoming"; syncDir(); }),
+      radio("dir", "outgoing", "صادر", dir === "outgoing", () => { dir = "outgoing"; syncDir(); }))),
+    row(h("span", {}, "نوع البريد"), h("div", { class: "classes" },
+      canExternal ? radio("scope", "external", "خارجي", (q.get("scope") || "external") === "external") : null,
+      radio("scope", "internal", "داخلي", !canExternal || q.get("scope") === "internal"))),
+    row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "" }), true),
+    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة" }), true),
+    row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة" })),
+    row("الرقم المتسلسل للمراسلة", h("input", { name: "party_ref", maxlength: 100, placeholder: "حروف وأرقام" })),
+    row("المرفق", h("input", { type: "file", name: "file" })),
+    row(h("span", {}, "تصنيف الوثيقة"), classes),
+    row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" }, radio("needs_reply", "1", "نعم", false), radio("needs_reply", "0", "لا", true))),
+    h("details", { class: "more2" },
+      h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
+      row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
+      row("رقم الجوال", h("input", { name: "deliverer_phone", maxlength: 30, type: "tel", dir: "ltr", placeholder: "رقم الجوال" })),
+      row(dl("واردة عبر البريد الإلكتروني", "صادرة عبر البريد الإلكتروني"), h("input", { name: "deliverer_email", maxlength: 150, type: "email", dir: "ltr", placeholder: "البريد الإلكتروني" })),
+      row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date", required: true, value: today() }), true),
+      row("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
+      row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" })),
+      row("التصنيف الموضوعي", h("input", { name: "category", maxlength: 60, placeholder: "مثال: عقود، شكاوى، تعاميم" })),
+      can("see_all") ? row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id)) : null,
+      row("الإدارة المعنية (للداخلي)", sel("party_dept_id", deptOpts, "")),
+      row("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, ""))),
+    err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));
+  syncDir();
+  return [title, form];
 }
 let fieldSeq = 0;
 function f(label, input, req, cls) {
@@ -405,7 +448,7 @@ async function detailView(id) {
 
   const fileIn = h("input", { type: "file" });
   return [
-    h("div", { class: "row" }, h("h2", {}, c.subject), statusPill(c.status), c.priority !== "normal" ? pill(c.priority, L.priority[c.priority]) : null,
+    h("div", { class: "row" }, h("h2", {}, c.subject), statusPill(c.status), c.priority !== "normal" ? prioPill(c.priority) : null,
       c.conf_level ? pill("conf" + c.conf_level, L.conf[c.conf_level]) : null, overdue ? pill("urgent", "متأخرة") : null),
     h("div", { class: "card" }, h("dl", { class: "meta" },
       m("رقم القيد", h("span", { class: "ltr" }, c.ref_no)), m("النوع", typeLabel(c)),
@@ -413,6 +456,11 @@ async function detailView(id) {
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
       m("الاستحقاق", c.due_date || "—"), m("الإدارة المسؤولة", c.department_name || "—"), m("الإدارة المعنية", c.party_dept_name || "—"),
       m("المسؤول الحالي", c.assignee_name || "—"), m("التصنيف", c.category || "—"),
+      m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
+      c.deliverer_name ? m(c.direction === "incoming" ? "مسلّم المراسلة" : "مستلم المراسلة", c.deliverer_name) : null,
+      c.deliverer_phone ? m("رقم الجوال", h("span", { class: "ltr" }, c.deliverer_phone)) : null,
+      c.deliverer_email ? m("البريد الإلكتروني", h("span", { class: "ltr" }, c.deliverer_email)) : null,
+      c.delivery_notes ? m("ملاحظات التسليم", c.delivery_notes) : null,
       m("سُجّلت بواسطة", `${c.creator_name} — ${fmtDT(c.created_at)}`),
       c.parent ? m("رد على", h("a", { href: "#/c/" + c.parent.id }, c.parent.ref_no)) : null),
       c.summary ? h("p", {}, h("strong", {}, "الملخص: "), c.summary) : null,
@@ -440,41 +488,6 @@ async function detailView(id) {
 }
 
 // ───────── الإدارة ─────────
-async function usersAdminView() {
-  const users = await api("/users");
-  const e1 = h("div", { class: "err" }), e2 = h("div", { class: "err" });
-  const uform = h("form", { class: "card", onsubmit: async (e) => {
-    e.preventDefault(); e1.textContent = "";
-    const b = Object.fromEntries([...uform.elements].filter((x) => x.name && x.value !== "").map((x) => [x.name, x.value]));
-    try { await api("/users", { method: "POST", body: b }); toast("تم إنشاء المستخدم"); await loadRefs(); render(); } catch (ex) { e1.textContent = ex.message; }
-  } }, h("h3", {}, "مستخدم جديد"),
-    h("div", { class: "form-grid" },
-      f("اسم المستخدم", h("input", { name: "username", required: true, pattern: "[A-Za-z0-9_.-]{3,32}", autocomplete: "off" }), true),
-      f("الاسم الكامل", h("input", { name: "full_name", required: true }), true),
-      f("كلمة مرور مؤقتة", h("input", { name: "password", type: "password", required: true, minlength: 8, autocomplete: "new-password" }), true),
-      f("الدور", sel("role", L.role, "employee"), true),
-      f("الإدارة", sel("department_id", Object.fromEntries(state.depts.map((d) => [d.id, d.name])), state.depts[0] && state.depts[0].id)),
-      f("درجة الصلاحية السرّية", sel("clearance", Object.fromEntries(L.conf.map((v, i) => [i, v])), 0))),
-    e1, h("button", { class: "btn" }, "إضافة"));
-  const dform = h("form", { class: "card", onsubmit: async (e) => {
-    e.preventDefault(); e2.textContent = "";
-    try { await api("/departments", { method: "POST", body: { name: dform.name.value } }); await loadRefs(); render(); } catch (ex) { e2.textContent = ex.message; }
-  } }, h("h3", {}, "إدارة جديدة"), h("div", { class: "row" }, h("input", { name: "name", required: true, placeholder: "اسم الإدارة" }), h("button", { class: "btn" }, "إضافة")), e2,
-    h("p", { class: "small muted" }, "الإدارات الحالية: " + state.depts.map((d) => d.name).join("، ")));
-  const reset = async (u) => {
-    const pw = prompt(`كلمة مرور مؤقتة جديدة للمستخدم ${u.full_name} (8 أحرف، حروف وأرقام):`);
-    if (!pw) return;
-    try { await api("/users/" + u.id, { method: "PUT", body: { password: pw } }); toast("تم التصفير، سيُطلب تغييرها عند الدخول"); } catch (e) { toast(e.message, true); }
-  };
-  return [h("h2", {}, "المستخدمون والإدارات"), uform, dform,
-    h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الاسم", "المستخدم", "الدور", "الإدارة", "السرية", "الحالة", ""].map((t) => h("th", {}, t)))),
-      h("tbody", {}, users.map((u) => h("tr", {}, h("td", {}, u.full_name), h("td", { class: "ltr" }, u.username), h("td", {}, L.role[u.role]), h("td", {}, deptName(u.department_id)),
-        h("td", {}, L.conf[u.clearance]), h("td", {}, u.active ? pill("closed", "نشط") : pill("archived", "معطّل")),
-        h("td", { class: "row" }, h("button", { class: "btn ghost sm", onclick: () => reset(u) }, "تصفير كلمة المرور"),
-          u.id !== state.user.id ? h("button", { class: "btn ghost sm", onclick: async () => {
-            try { await api("/users/" + u.id, { method: "PUT", body: { active: !u.active } }); render(); } catch (e) { toast(e.message, true); } } }, u.active ? "تعطيل" : "تفعيل") : null))))))];
-}
-
 async function auditView() {
   const rows = await api("/admin/audit?limit=300");
   return [h("h2", {}, "سجل التدقيق"), h("p", { class: "muted small" }, "كل العمليات (الدخول، التسجيل، الإحالة، التنزيل، التصدير…) مع المستخدم وعنوان الشبكة. السجل للقراءة فقط."),
@@ -509,7 +522,14 @@ async function integrationView() {
 
 // ───────── التوجيه ─────────
 async function loadRefs() {
-  [state.depts, state.users] = await Promise.all([api("/departments"), api("/users")]);
+  [state.depts, state.users, state.cls] = await Promise.all([api("/departments"), api("/users"), api("/classifications")]);
+  state.clsMap = Object.fromEntries(state.cls.map((c) => [c.key, c]));
+  // الأولويات المعطّلة تبقى معروضة للمراسلات القديمة
+  if (state.user.role === "admin") {
+    const all = await api("/classifications?all=1");
+    all.forEach((c) => (state.clsMap[c.key] = c));
+  }
+  L.priority = Object.fromEntries(Object.values(state.clsMap).sort((a, b) => a.sort - b.sort).map((c) => [c.key, c.label]));
 }
 
 async function boot() {
@@ -535,7 +555,8 @@ async function render() {
     else if (path === "/new") view = newView(q);
     else if (path === "/password") view = changePasswordView(false);
     else if (path.startsWith("/c/")) view = await detailView(Number(path.slice(3)));
-    else if (path === "/admin/users" && state.user.role === "admin") view = await usersAdminView();
+    else if (path === "/reports" && (isStaff() || can("export"))) view = await reportsView(q);
+    else if (path.startsWith("/admin/") && state.user.role === "admin" && ADMIN_VIEWS[path.slice(7)]) view = await ADMIN_VIEWS[path.slice(7)]();
     else if (path === "/admin/audit" && state.user.role === "admin") view = await auditView();
     else if (path === "/admin/integration" && state.user.role === "admin") view = await integrationView();
     else view = [h("h2", {}, "الصفحة غير موجودة")];

@@ -38,7 +38,19 @@ ALLOWED_EXT = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"
 
 ROLES = ("admin", "manager", "clerk", "employee")
 STATUSES = ("new", "in_progress", "referred", "closed", "archived")
-PRIORITIES = ("normal", "high", "urgent")
+URGENT = "(SELECT key FROM classifications WHERE is_urgent=1)"
+PERMS = {"create_external": "تسجيل المراسلات الخارجية", "export": "التصدير والتقارير",
+         "see_all": "الاطلاع على كل المراسلات (ضمن درجة السرية)", "manage_all": "تحديث الحالة والإحالة لأي مراسلة"}
+DEFAULT_PERMS = {"manager": ("create_external", "export", "manage_all"),
+                 "clerk": ("create_external", "export", "see_all", "manage_all"), "employee": ()}
+DEFAULT_CLASSES = [  # key, label, color, conf_level, is_urgent
+    ("very_urgent", "عاجل جدا", "#b91c1c", 0, 1), ("urgent", "عاجل", "#ea580c", 0, 1),
+    ("very_high", "مهم جدا", "#d97706", 0, 0), ("high", "مهم", "#a16207", 0, 0),
+    ("secret", "سري", "#7c3aed", 1, 0), ("normal", "عادي", "#475569", 0, 0), ("low", "غير مهم", "#94a3b8", 0, 0)]
+USER_COLUMNS = {"job_title": "TEXT", "phone": "TEXT", "email": "TEXT"}
+NEW_COLUMNS = {"needs_reply": "INTEGER NOT NULL DEFAULT 0", "deliverer_name": "TEXT", "deliverer_phone": "TEXT",
+               "deliverer_email": "TEXT", "delivery_notes": "TEXT"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 WEBHOOK_EVENTS = ("correspondence.created", "correspondence.referred", "correspondence.status")
 
 SCHEMA = """
@@ -79,6 +91,12 @@ CREATE TABLE IF NOT EXISTS transfers(
   instruction TEXT, due_date TEXT, status TEXT NOT NULL DEFAULT 'pending',
   note TEXT, created_at TEXT NOT NULL, done_at TEXT);
 CREATE INDEX IF NOT EXISTS ix_t_to ON transfers(to_user, status);
+CREATE TABLE IF NOT EXISTS classifications(
+  id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, label TEXT NOT NULL, color TEXT NOT NULL DEFAULT '#475569',
+  conf_level INTEGER NOT NULL DEFAULT 0, is_urgent INTEGER NOT NULL DEFAULT 0, sort INTEGER NOT NULL DEFAULT 100,
+  active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS role_perms(
+  role TEXT NOT NULL, perm TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(role, perm));
 CREATE TABLE IF NOT EXISTS reads(
   corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
   at TEXT NOT NULL, PRIMARY KEY(corr_id, user_id));
@@ -170,6 +188,22 @@ def init_db():
     os.makedirs(UPLOADS, exist_ok=True)
     conn = connect()
     conn.executescript(SCHEMA)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(correspondences)")}
+    for col, ddl in NEW_COLUMNS.items():  # ترحيل القواعد القديمة
+        if col not in have:
+            conn.execute(f"ALTER TABLE correspondences ADD COLUMN {col} {ddl}")
+    have_u = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    for col, ddl in USER_COLUMNS.items():
+        if col not in have_u:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
+    if conn.execute("SELECT COUNT(*) FROM classifications").fetchone()[0] == 0:
+        for i, (k, label, color, cl, urg) in enumerate(DEFAULT_CLASSES, 1):
+            conn.execute("INSERT INTO classifications(key,label,color,conf_level,is_urgent,sort) VALUES(?,?,?,?,?,?)",
+                         (k, label, color, cl, urg, i))
+    if conn.execute("SELECT COUNT(*) FROM role_perms").fetchone()[0] == 0:
+        for role in ("manager", "clerk", "employee"):
+            for perm in PERMS:
+                conn.execute("INSERT INTO role_perms VALUES(?,?,?)", (role, perm, 1 if perm in DEFAULT_PERMS[role] else 0))
     if conn.execute("SELECT COUNT(*) FROM departments").fetchone()[0] == 0:
         for d in DEFAULT_DEPARTMENTS:
             conn.execute("INSERT INTO departments(name) VALUES(?)", (d,))
@@ -192,6 +226,10 @@ def init_db():
 
 
 # ───────────────────────── الصلاحيات ─────────────────────────
+def can(u, perm):
+    return u["role"] == "admin" or perm in u.get("perms", ())
+
+
 def visible_clause(u, alias="c"):
     """شرط SQL يحدد المراسلات التي يحق للمستخدم رؤيتها (الدور + درجة السرية + الارتباط)."""
     a = alias
@@ -202,7 +240,7 @@ def visible_clause(u, alias="c"):
                 f"WHERE t.corr_id={a}.id AND (t.to_user=? OR t.from_user=?))")
     p = [u["clearance"]]
     ip = [u["id"], u["id"], u["id"], u["id"]]
-    if u["role"] == "clerk":
+    if can(u, "see_all"):
         return f"({conf})", p
     if u["role"] == "manager" and u["department_id"]:
         return (f"({conf} AND ({a}.department_id=? OR {a}.party_dept_id=? OR {involved}))",
@@ -219,7 +257,16 @@ def get_visible(ctx, cid):
 
 
 def can_manage(u, corr):
-    return u["role"] in ("admin", "manager", "clerk") or corr["assigned_to"] == u["id"]
+    return can(u, "manage_all") or corr["assigned_to"] == u["id"]
+
+
+def classes(conn, active_only=True):
+    rows = conn.execute("SELECT * FROM classifications" + (" WHERE active=1" if active_only else "") + " ORDER BY sort, id")
+    return {r["key"]: r for r in rows}
+
+
+def load_perms(conn, role):
+    return {r[0] for r in conn.execute("SELECT perm FROM role_perms WHERE role=? AND allowed=1", (role,))}
 
 
 # ───────────────────────── التحقق من المدخلات ─────────────────────────
@@ -396,16 +443,19 @@ def logout(ctx):
 
 
 def public_user(u, full=False):
-    d = {"id": u["id"], "full_name": u["full_name"], "role": u["role"], "department_id": u["department_id"]}
+    d = {"id": u["id"], "full_name": u["full_name"], "role": u["role"], "department_id": u["department_id"],
+         "job_title": u["job_title"]}
     if full:
         d.update(username=u["username"], clearance=u["clearance"], must_change=bool(u["must_change"]),
-                 active=bool(u["active"]))
+                 active=bool(u["active"]), phone=u["phone"], email=u["email"])
     return d
 
 
 @route("GET", r"/api/me")
 def me(ctx):
-    return 200, public_user(ctx.user, True)
+    d = public_user(ctx.user, True)
+    d["perms"] = sorted(PERMS) if ctx.user["role"] == "admin" else sorted(ctx.user.get("perms", ()))
+    return 200, d
 
 
 @route("POST", r"/api/me/password")
@@ -442,7 +492,9 @@ def build_filters(ctx):
         where.append("c.direction=?"); p.append(q["direction"])
     if q.get("status") in STATUSES:
         where.append("c.status=?"); p.append(q["status"])
-    if q.get("priority") in PRIORITIES:
+    if q.get("priority") == "urgent_all":
+        where.append(f"c.priority IN {URGENT} AND c.status NOT IN('closed','archived')")
+    elif q.get("priority") and ctx.conn.execute("SELECT 1 FROM classifications WHERE key=?", (q["priority"],)).fetchone():
         where.append("c.priority=?"); p.append(q["priority"])
     if q.get("dept", "").isdigit():
         where.append("c.department_id=?"); p.append(int(q["dept"]))
@@ -500,7 +552,7 @@ def list_corr(ctx):
     kpi = {"total": n(),
            "unread": n("AND NOT EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)", [ctx.user["id"]]),
            "in_progress": n("AND c.status='in_progress'"),
-           "urgent": n("AND c.priority='urgent' AND c.status NOT IN('closed','archived')")}
+           "urgent": n(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')")}
     return 200, {"total": total, "page": page, "size": size, "kpi": kpi, "items": [dict(r) for r in rows]}
 
 
@@ -522,7 +574,7 @@ def create_corr(ctx):
     b, u, conn = ctx.body, ctx.user, ctx.conn
     scope = f_enum(b, "scope", ("external", "internal"), label="نطاق المراسلة")
     direction = f_enum(b, "direction", ("incoming", "outgoing"), label="الاتجاه")
-    if scope == "external" and u["role"] == "employee":
+    if scope == "external" and not can(u, "create_external"):
         raise ApiError(403, "المراسلات الخارجية يسجّلها مكتب الصادر والوارد أو المدير فقط")
     subject = f_text(b, "subject", 300, True, "الموضوع")
     summary = f_text(b, "summary", 5000)
@@ -531,11 +583,21 @@ def create_corr(ctx):
     doc_date = f_date(b, "doc_date", True, "تاريخ المراسلة")
     due = f_date(b, "due_date", label="تاريخ الاستحقاق")
     category = f_text(b, "category", 60)
-    priority = f_enum(b, "priority", PRIORITIES, "normal", "الأولوية")
-    conf = f_int(b, "conf_level", 0, 2) or 0
+    needs_reply = f_int(b, "needs_reply", 0, 1) or 0
+    d_name = f_text(b, "deliverer_name", 100)
+    d_phone = f_text(b, "deliverer_phone", 30)
+    d_email = f_text(b, "deliverer_email", 150)
+    if d_email and not EMAIL_RE.match(d_email):
+        raise ApiError(400, "البريد الإلكتروني غير صالح")
+    d_notes = f_text(b, "delivery_notes", 1000)
+    priority = f_text(b, "priority", 40) or "normal"
+    cls = classes(conn).get(priority)
+    if not cls:
+        raise ApiError(400, "تصنيف الوثيقة غير صالح")
+    conf = cls["conf_level"]  # درجة السرية تُشتق من التصنيف
     if conf > u["clearance"]:
-        raise ApiError(403, "لا يمكنك تسجيل مراسلة بدرجة سرية أعلى من صلاحيتك")
-    dept = f_int(b, "department_id") if u["role"] in ("admin", "clerk") else None
+        raise ApiError(403, "لا يمكنك تسجيل مراسلة بهذا التصنيف لأن درجة سريته أعلى من صلاحيتك")
+    dept = f_int(b, "department_id") if can(u, "see_all") else None
     dept = dept or u["department_id"]
     pdept = f_int(b, "party_dept_id")
     dept_exists(conn, dept); dept_exists(conn, pdept)
@@ -558,10 +620,12 @@ def create_corr(ctx):
         status = "referred" if assigned else "new"
         cur = conn.execute(
             "INSERT INTO correspondences(ref_no,scope,direction,subject,summary,party,party_ref,party_dept_id,doc_date,"
-            "category,priority,conf_level,status,department_id,assigned_to,due_date,parent_id,created_by,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "category,priority,conf_level,status,department_id,assigned_to,due_date,parent_id,created_by,created_at,updated_at,"
+            "needs_reply,deliverer_name,deliverer_phone,deliverer_email,delivery_notes)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ref, scope, direction, subject, summary, party, party_ref, pdept, doc_date, category, priority, conf,
-             status, dept, assigned, due, parent, u["id"], now(), now()))
+             status, dept, assigned, due, parent, u["id"], now(), now(),
+             needs_reply, d_name, d_phone, d_email, d_notes))
         cid = cur.lastrowid
         conn.execute("INSERT INTO reads VALUES(?,?,?)", (cid, u["id"], now()))
         if assigned:
@@ -615,8 +679,14 @@ def update_corr(ctx):
             raise ApiError(403, "المراسلة المؤرشفة لا يعدّلها إلا المدير")
         sets.append("status=?"); p.append(st); notes.append(f"الحالة: {c['status']} ← {st}")
     if "priority" in b:
-        pr = f_enum(b, "priority", PRIORITIES, label="الأولوية")
-        sets.append("priority=?"); p.append(pr); notes.append(f"الأولوية: {pr}")
+        pr = f_text(b, "priority", 40, True, "التصنيف")
+        cls = classes(conn).get(pr)
+        if not cls:
+            raise ApiError(400, "تصنيف الوثيقة غير صالح")
+        if cls["conf_level"] > ctx.user["clearance"] or (cls["conf_level"] < c["conf_level"] and ctx.user["role"] != "admin"):
+            raise ApiError(403, "لا تملك صلاحية تغيير درجة السرية إلى هذا التصنيف")
+        sets.append("priority=?"); p.append(pr); notes.append(f"التصنيف: {cls['label']}")
+        sets.append("conf_level=?"); p.append(cls["conf_level"])
     if "due_date" in b:
         dd = f_date(b, "due_date", label="الاستحقاق")
         sets.append("due_date=?"); p.append(dd); notes.append(f"الاستحقاق: {dd}")
@@ -768,7 +838,7 @@ def dashboard(ctx):
     return 200, {
         "total": one(), "by_status": by_status, "by_type": by_type, "monthly": monthly, "recent": recent,
         "overdue": one("AND c.due_date IS NOT NULL AND c.due_date<date('now','localtime') AND c.status NOT IN('closed','archived')"),
-        "urgent_open": one("AND c.priority='urgent' AND c.status NOT IN('closed','archived')"),
+        "urgent_open": one(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')"),
         "my_tasks": conn.execute("SELECT COUNT(*) FROM transfers WHERE to_user=? AND status='pending'",
                                  (ctx.user["id"],)).fetchone()[0],
     }
@@ -781,18 +851,19 @@ def csv_safe(v):
 
 @route("GET", r"/api/export")
 def export_csv(ctx):
-    if ctx.user["role"] == "employee":
-        raise ApiError(403, "التصدير متاح للمدراء ومكتب الصادر والوارد")
+    if not can(ctx.user, "export"):
+        raise ApiError(403, "لا تملك صلاحية التصدير")
     where, p = build_filters(ctx)
     rows = ctx.conn.execute(f"SELECT {FIELDS} {JOINS} WHERE {where} ORDER BY c.id DESC LIMIT 20000", p).fetchall()
     out = io.StringIO()
+    names = {k: v["label"] for k, v in classes(ctx.conn, False).items()}
     w = csv.writer(out)
     w.writerow(["رقم القيد", "النطاق", "الاتجاه", "الموضوع", "الجهة", "رقم مرجع الجهة", "تاريخ المراسلة",
                 "الأولوية", "السرية", "الحالة", "الإدارة", "المسؤول", "الاستحقاق", "تاريخ التسجيل"])
     for r in rows:
         w.writerow([csv_safe(x) for x in (
             r["ref_no"], r["scope"], r["direction"], r["subject"], r["party"], r["party_ref"], r["doc_date"],
-            r["priority"], r["conf_level"], r["status"], r["department_name"], r["assignee_name"], r["due_date"],
+            names.get(r["priority"], r["priority"]), r["conf_level"], r["status"], r["department_name"], r["assignee_name"], r["due_date"],
             r["created_at"])])
     audit(ctx, "export", detail=f"{len(rows)} سجل")
     return Raw(200, ("﻿" + out.getvalue()).encode("utf-8"), {
@@ -816,6 +887,135 @@ def add_dept(ctx):
     return 201, {"id": cur.lastrowid}
 
 
+@route("PUT", r"/api/departments/(?P<id>\d+)", roles=("admin",))
+def edit_dept(ctx):
+    did, b = int(ctx.params["id"]), ctx.body
+    if not ctx.conn.execute("SELECT 1 FROM departments WHERE id=?", (did,)).fetchone():
+        raise ApiError(404, "الوحدة غير موجودة")
+    sets, p = [], []
+    if "name" in b:
+        sets.append("name=?"); p.append(f_text(b, "name", 100, True, "اسم الوحدة"))
+    if "active" in b:
+        sets.append("active=?"); p.append(1 if b["active"] else 0)
+    if not sets:
+        raise ApiError(400, "لا يوجد ما يُحدَّث")
+    try:
+        ctx.conn.execute(f"UPDATE departments SET {','.join(sets)} WHERE id=?", p + [did])
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "يوجد وحدة بالاسم نفسه")
+    audit(ctx, "dept_update", "department", did, json.dumps(b, ensure_ascii=False)[:200])
+    return 200, {"ok": True}
+
+
+# ───────────── التصنيفات (تصنيف الوثيقة + الخصوصية) ─────────────
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+@route("GET", r"/api/classifications")
+def list_classes(ctx):
+    allc = ctx.user["role"] == "admin" and ctx.query.get("all") == "1"
+    return 200, [dict(r) for r in classes(ctx.conn, not allc).values()]
+
+
+def class_fields(b, creating):
+    out = {}
+    if creating or "label" in b:
+        out["label"] = f_text(b, "label", 40, True, "الاسم")
+    if "color" in b:
+        c = f_text(b, "color", 7, True, "اللون")
+        if not COLOR_RE.match(c):
+            raise ApiError(400, "اللون يجب أن يكون بصيغة #RRGGBB")
+        out["color"] = c
+    if "conf_level" in b:
+        out["conf_level"] = f_int(b, "conf_level", 0, 2, True)
+    if "is_urgent" in b:
+        out["is_urgent"] = 1 if b["is_urgent"] else 0
+    if "sort" in b:
+        out["sort"] = f_int(b, "sort", 0, 1000, True)
+    if "active" in b:
+        out["active"] = 1 if b["active"] else 0
+    return out
+
+
+@route("POST", r"/api/classifications", roles=("admin",))
+def add_class(ctx):
+    f = class_fields(ctx.body, True)
+    key = "c_" + secrets.token_hex(4)
+    mx = ctx.conn.execute("SELECT COALESCE(MAX(sort),0) FROM classifications").fetchone()[0]
+    ctx.conn.execute("INSERT INTO classifications(key,label,color,conf_level,is_urgent,sort) VALUES(?,?,?,?,?,?)",
+                     (key, f["label"], f.get("color", "#475569"), f.get("conf_level", 0), f.get("is_urgent", 0), f.get("sort", mx + 1)))
+    audit(ctx, "class_create", "classification", None, f["label"])
+    return 201, {"key": key}
+
+
+@route("PUT", r"/api/classifications/(?P<key>[A-Za-z0-9_]+)", roles=("admin",))
+def edit_class(ctx):
+    key = ctx.params["key"]
+    if not ctx.conn.execute("SELECT 1 FROM classifications WHERE key=?", (key,)).fetchone():
+        raise ApiError(404, "التصنيف غير موجود")
+    f = class_fields(ctx.body, False)
+    if not f:
+        raise ApiError(400, "لا يوجد ما يُحدَّث")
+    if f.get("active") == 0 and key == "normal":
+        raise ApiError(400, "لا يمكن تعطيل التصنيف الافتراضي (عادي)")
+    ctx.conn.execute(f"UPDATE classifications SET {','.join(k + '=?' for k in f)} WHERE key=?", list(f.values()) + [key])
+    audit(ctx, "class_update", "classification", None, f"{key}: {json.dumps(f, ensure_ascii=False)}")
+    return 200, {"ok": True}
+
+
+# ───────────── الصلاحيات حسب الدور ─────────────
+@route("GET", r"/api/admin/perms", roles=("admin",))
+def perms_get(ctx):
+    roles = {r: {p: False for p in PERMS} for r in ("manager", "clerk", "employee")}
+    for r in ctx.conn.execute("SELECT role,perm,allowed FROM role_perms"):
+        if r["role"] in roles and r["perm"] in PERMS:
+            roles[r["role"]][r["perm"]] = bool(r["allowed"])
+    return 200, {"perms": PERMS, "roles": roles}
+
+
+@route("PUT", r"/api/admin/perms", roles=("admin",))
+def perms_set(ctx):
+    role = f_enum(ctx.body, "role", ("manager", "clerk", "employee"), label="الدور")
+    perm = f_enum(ctx.body, "perm", tuple(PERMS), label="الصلاحية")
+    allowed = 1 if ctx.body.get("allowed") else 0
+    ctx.conn.execute("INSERT INTO role_perms VALUES(?,?,?) ON CONFLICT(role,perm) DO UPDATE SET allowed=excluded.allowed",
+                     (role, perm, allowed))
+    audit(ctx, "perm_update", None, None, f"{role}.{perm}={allowed}")
+    return 200, {"ok": True}
+
+
+# ───────────── التقارير ─────────────
+@route("GET", r"/api/reports")
+def reports(ctx):
+    if not (ctx.user["role"] in ("admin", "manager", "clerk") or can(ctx.user, "export")):
+        raise ApiError(403, "التقارير متاحة للمدراء ومكتب الصادر والوارد")
+    where, p = build_filters(ctx)
+    conn = ctx.conn
+
+    def rows(sql, extra=()):
+        return [dict(r) for r in conn.execute(sql, p + list(extra))]
+    base = ("FROM correspondences c LEFT JOIN departments d ON d.id=c.department_id "
+            f"LEFT JOIN classifications k ON k.key=c.priority WHERE {where}")
+    open_ = "c.status NOT IN('closed','archived')"
+    return 200, {
+        "total": conn.execute(f"SELECT COUNT(*) {base}", p).fetchone()[0],
+        "by_status": rows(f"SELECT c.status AS k, COUNT(*) AS n {base} GROUP BY c.status"),
+        "by_class": rows(f"SELECT COALESCE(k.label,c.priority) AS k, COALESCE(k.color,'#475569') AS color, COUNT(*) AS n "
+                         f"{base} GROUP BY c.priority ORDER BY k.sort"),
+        "by_unit": rows(f"SELECT COALESCE(d.name,'بدون وحدة') AS k, SUM(c.direction='incoming') AS incoming, "
+                        f"SUM(c.direction='outgoing') AS outgoing, COUNT(*) AS n {base} GROUP BY c.department_id ORDER BY n DESC"),
+        "by_month": rows(f"SELECT substr(c.doc_date,1,7) AS k, SUM(c.direction='incoming') AS incoming, "
+                         f"SUM(c.direction='outgoing') AS outgoing {base} GROUP BY 1 ORDER BY 1"),
+        "by_type": rows(f"SELECT c.scope, c.direction, COUNT(*) AS n {base} GROUP BY 1,2"),
+        "top_parties": rows(f"SELECT c.party AS k, COUNT(*) AS n {base} GROUP BY c.party ORDER BY n DESC LIMIT 10"),
+        "overdue": conn.execute(f"SELECT COUNT(*) {base} AND c.due_date IS NOT NULL AND c.due_date<date('now','localtime') AND {open_}", p).fetchone()[0],
+        "awaiting_reply": conn.execute(f"SELECT COUNT(*) {base} AND c.needs_reply=1 AND {open_} AND NOT EXISTS("
+                                       f"SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)", p).fetchone()[0],
+        "avg_close_days": conn.execute(f"SELECT ROUND(AVG(julianday(c.updated_at)-julianday(c.created_at)),1) {base} "
+                                       f"AND c.status IN('closed','archived')", p).fetchone()[0],
+    }
+
+
 @route("GET", r"/api/users")
 def list_users(ctx):
     full = ctx.user["role"] == "admin"
@@ -835,10 +1035,14 @@ def add_user(ctx):
     dept = f_int(b, "department_id")
     dept_exists(ctx.conn, dept)
     clearance = f_int(b, "clearance", 0, 2) or 0
+    job, phone, email = f_text(b, "job_title", 100), f_text(b, "phone", 30), f_text(b, "email", 150)
+    if email and not EMAIL_RE.match(email):
+        raise ApiError(400, "البريد الإلكتروني غير صالح")
     try:
         cur = ctx.conn.execute(
-            "INSERT INTO users(username,full_name,password_hash,role,department_id,clearance,must_change,created_at) "
-            "VALUES(?,?,?,?,?,?,1,?)", (username, full_name, hash_password(b["password"]), role, dept, clearance, now()))
+            "INSERT INTO users(username,full_name,password_hash,role,department_id,clearance,must_change,created_at,"
+            "job_title,phone,email) VALUES(?,?,?,?,?,?,1,?,?,?,?)",
+            (username, full_name, hash_password(b["password"]), role, dept, clearance, now(), job, phone, email))
     except sqlite3.IntegrityError:
         raise ApiError(409, "اسم المستخدم مستخدم مسبقًا")
     audit(ctx, "user_create", "user", cur.lastrowid, f"{username} ({role})")
@@ -854,7 +1058,20 @@ def edit_user(ctx):
     sets, p, notes = [], [], []
     if "full_name" in b:
         sets.append("full_name=?"); p.append(f_text(b, "full_name", 100, True, "الاسم"))
+    for col, ln in (("job_title", 100), ("phone", 30), ("email", 150)):
+        if col in b:
+            v = f_text(b, col, ln)
+            if col == "email" and v and not EMAIL_RE.match(v):
+                raise ApiError(400, "البريد الإلكتروني غير صالح")
+            sets.append(f"{col}=?"); p.append(v)
+    if "username" in b:
+        un = f_text(b, "username", 32, True, "اسم المستخدم")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", un):
+            raise ApiError(400, "اسم المستخدم: 3–32 حرفًا إنجليزيًا أو أرقامًا أو (_ . -)")
+        sets.append("username=?"); p.append(un); notes.append("username=" + un)
     if "role" in b:
+        if uid == ctx.user["id"] and b["role"] != "admin":
+            raise ApiError(400, "لا يمكنك تغيير دور حسابك")
         sets.append("role=?"); p.append(f_enum(b, "role", ROLES)); notes.append("role=" + b["role"])
     if "department_id" in b:
         d = f_int(b, "department_id"); dept_exists(ctx.conn, d); sets.append("department_id=?"); p.append(d)
@@ -870,11 +1087,14 @@ def edit_user(ctx):
         p.append(hash_password(b["password"])); notes.append("تصفير كلمة المرور")
     if not sets:
         raise ApiError(400, "لا يوجد ما يُحدَّث")
-    with tx(ctx.conn):
-        ctx.conn.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", p + [uid])
-        if "active" in b and not b["active"]:
-            ctx.conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-        audit(ctx, "user_update", "user", uid, ", ".join(notes))
+    try:
+        with tx(ctx.conn):
+            ctx.conn.execute(f"UPDATE users SET {','.join(sets)} WHERE id=?", p + [uid])
+            if "active" in b and not b["active"]:
+                ctx.conn.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+            audit(ctx, "user_update", "user", uid, ", ".join(notes))
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "اسم المستخدم مستخدم مسبقًا")
     return 200, {"ok": True}
 
 
@@ -988,13 +1208,18 @@ class Handler(BaseHTTPRequestHandler):
             if r:
                 u = dict(r)
                 u["via"] = "API:" + u.pop("key_name")
+                u["perms"] = load_perms(conn, u["role"])
                 return u
             return None
         a = self.headers.get("Authorization") or ""
         if a.startswith("Bearer "):
             r = conn.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
                              "WHERE s.token_hash=? AND s.expires_at>? AND u.active=1", (sha(a[7:]), now())).fetchone()
-            return dict(r) if r else None
+            if not r:
+                return None
+            u = dict(r)
+            u["perms"] = load_perms(conn, u["role"])
+            return u
         return None
 
     def serve_static(self, path):

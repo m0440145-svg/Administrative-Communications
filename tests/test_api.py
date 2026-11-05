@@ -111,13 +111,15 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(s, 201)
 
     def test_04_confidentiality_and_visibility(self):
-        s, d, _ = self.corr(self.tok["clerk1"], conf_level=1, subject="سري")
+        s, d, _ = self.corr(self.tok["clerk1"], priority="secret", subject="سري")
         self.assertEqual(s, 201)
         self.assertEqual(call("GET", f"/api/correspondences/{d['id']}", token=self.tok["emp1"])[0], 404)
         self.assertEqual(call("GET", f"/api/correspondences/{d['id']}", token=self.tok["mgr1"])[0], 404)  # ليست إدارته
         self.assertEqual(call("GET", f"/api/correspondences/{d['id']}", token=self.tok["clerk1"])[0], 200)
         # لا يمكن تسجيل مراسلة أعلى من الصلاحية
-        self.assertEqual(self.corr(self.tok["clerk1"], conf_level=2)[0], 403)
+        s, k, _ = call("POST", "/api/classifications", {"label": "سري للغاية", "conf_level": 2, "color": "#000000"}, self.admin)
+        self.assertEqual(s, 201)
+        self.assertEqual(self.corr(self.tok["clerk1"], priority=k["key"])[0], 403)
         # إحالة مراسلة سرية لموظف بلا صلاحية مرفوضة
         s, e, _ = call("POST", f"/api/correspondences/{d['id']}/transfers", {"to_user": self.uid["emp1"]}, self.tok["clerk1"])
         self.assertEqual(s, 400)
@@ -200,6 +202,53 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(mine[0], 200)
         self.assertEqual(call("POST", "/api/correspondences/read", {"ids": [cid]}, self.tok["clerk1"])[0], 200)
         self.assertEqual(call("POST", "/api/correspondences/read", {"ids": ["x"]}, self.tok["clerk1"])[0], 400)
+
+    def test_09c_delivery_fields_and_priorities(self):
+        s, d, _ = self.corr(self.tok["clerk1"], priority="very_urgent", needs_reply=1, deliverer_name="أحمد",
+                            deliverer_phone="0500000000", deliverer_email="a@b.sa", delivery_notes="سلّمت باليد")
+        self.assertEqual(s, 201)
+        c = call("GET", f"/api/correspondences/{d['id']}", token=self.tok["clerk1"])[1]
+        self.assertEqual((c["needs_reply"], c["deliverer_name"], c["priority"]), (1, "أحمد", "very_urgent"))
+        self.assertEqual(self.corr(self.tok["clerk1"], deliverer_email="not-an-email")[0], 400)
+        self.assertEqual(self.corr(self.tok["clerk1"], priority="bogus")[0], 400)
+        k = call("GET", "/api/correspondences?priority=urgent_all", token=self.tok["clerk1"])[1]
+        self.assertTrue(any(i["id"] == d["id"] for i in k["items"]))
+
+    def test_09d_control_panel(self):
+        a = self.admin
+        cl = call("GET", "/api/classifications", token=self.tok["emp1"])[1]
+        self.assertEqual([c["label"] for c in cl[:7]], ["عاجل جدا", "عاجل", "مهم جدا", "مهم", "سري", "عادي", "غير مهم"])
+        self.assertEqual(call("POST", "/api/classifications", {"label": "x"}, self.tok["clerk1"])[0], 403)
+        self.assertEqual(call("POST", "/api/classifications", {"label": "x", "color": "red"}, a)[0], 400)
+        self.assertEqual(call("PUT", "/api/classifications/normal", {"active": False}, a)[0], 400)
+        # وحدات
+        s, d, _ = call("POST", "/api/departments", {"name": "وحدة اختبار"}, a)
+        self.assertEqual(s, 201)
+        self.assertEqual(call("PUT", f"/api/departments/{d['id']}", {"name": "وحدة معدّلة", "active": False}, a)[0], 200)
+        self.assertEqual(call("PUT", f"/api/departments/{d['id']}", {"name": "الإدارة العامة"}, a)[0], 409)
+        # موظفون
+        uid = self.uid["emp1"]
+        self.assertEqual(call("PUT", f"/api/users/{uid}", {"job_title": "محاسب", "phone": "0500", "email": "e@x.sa"}, a)[0], 200)
+        self.assertEqual(call("PUT", f"/api/users/{uid}", {"email": "bad"}, a)[0], 400)
+        u = [x for x in call("GET", "/api/users", token=a)[1] if x["id"] == uid][0]
+        self.assertEqual((u["job_title"], u["phone"]), ("محاسب", "0500"))
+        self.assertEqual(call("PUT", f"/api/users/{self.uid['mnag'] if 'mnag' in self.uid else self.uid['admin']}", {"role": "employee"}, a)[0], 400)
+        # صلاحيات الأدوار
+        self.assertEqual(call("PUT", "/api/admin/perms", {"role": "employee", "perm": "create_external", "allowed": True}, a)[0], 200)
+        self.assertEqual(self.corr(self.tok["emp1"])[0], 201)  # الآن مسموح
+        self.assertEqual(call("PUT", "/api/admin/perms", {"role": "employee", "perm": "create_external", "allowed": False}, a)[0], 200)
+        self.assertEqual(self.corr(self.tok["emp1"])[0], 403)
+        self.assertIn("export", call("GET", "/api/me", token=self.tok["clerk1"])[1]["perms"])
+        self.assertEqual(call("PUT", "/api/admin/perms", {"role": "employee", "perm": "nope", "allowed": 1}, a)[0], 400)
+
+    def test_09e_reports(self):
+        r = call("GET", "/api/reports", token=self.tok["clerk1"])
+        self.assertEqual(r[0], 200)
+        d = r[1]
+        self.assertGreater(d["total"], 0)
+        self.assertTrue(d["by_class"] and d["by_unit"] and d["by_month"])
+        self.assertEqual(call("GET", "/api/reports", token=self.tok["emp1"])[0], 403)
+        self.assertEqual(call("GET", "/api/reports?direction=outgoing&from=2026-01-01&to=2026-12-31", token=self.admin)[0], 200)
 
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
