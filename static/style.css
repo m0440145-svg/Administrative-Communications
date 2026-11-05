@@ -107,7 +107,10 @@ input.chk,td input[type=checkbox]{width:auto}
 .hbar{height:12px;border-radius:6px;background:var(--brand-2);min-width:3px}
 .bartbl .bn{font-weight:600}
 /* نموذج التسجيل */
-.fm{max-width:820px;padding:0}
+[hidden]{display:none!important}
+.classes:empty{display:none}
+.replyers .full{flex:1 0 100%}
+.fm{max-width:none;padding:0}
 .frow2{display:grid;grid-template-columns:210px 1fr;gap:14px;align-items:start;padding:12px 20px;border-bottom:1px solid var(--line)}
 .frow2 .lb{font-size:14px;color:var(--ink);padding-top:8px}
 .frow2 .lb.req::after{content:" *";color:var(--danger)}

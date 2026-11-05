@@ -49,7 +49,10 @@ DEFAULT_CLASSES = [  # key, label, color, conf_level, is_urgent
     ("secret", "سري", "#7c3aed", 1, 0), ("normal", "عادي", "#475569", 0, 0), ("low", "غير مهم", "#94a3b8", 0, 0)]
 USER_COLUMNS = {"job_title": "TEXT", "phone": "TEXT", "email": "TEXT"}
 NEW_COLUMNS = {"needs_reply": "INTEGER NOT NULL DEFAULT 0", "deliverer_name": "TEXT", "deliverer_phone": "TEXT",
-               "deliverer_email": "TEXT", "delivery_notes": "TEXT"}
+               "deliverer_email": "TEXT", "delivery_notes": "TEXT", "folder_id": "INTEGER", "type_id": "INTEGER"}
+LOOKUPS = {"folders": "folders", "types": "ctypes"}
+DEFAULT_FOLDERS = ["الوارد العام", "الصادر العام", "التعاميم", "العقود والاتفاقيات", "الشؤون المالية", "الموارد البشرية"]
+DEFAULT_TYPES = ["طلب", "شكوى", "استفسار", "تعميم", "دعوة", "تقرير", "عقد / اتفاقية", "إشعار"]
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 WEBHOOK_EVENTS = ("correspondence.created", "correspondence.referred", "correspondence.status")
 
@@ -97,6 +100,13 @@ CREATE TABLE IF NOT EXISTS classifications(
   active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS role_perms(
   role TEXT NOT NULL, perm TEXT NOT NULL, allowed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(role, perm));
+CREATE TABLE IF NOT EXISTS folders(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS ctypes(
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort INTEGER NOT NULL DEFAULT 100, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS reply_users(
+  corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'pending', done_at TEXT, PRIMARY KEY(corr_id, user_id));
 CREATE TABLE IF NOT EXISTS reads(
   corr_id INTEGER NOT NULL REFERENCES correspondences(id), user_id INTEGER NOT NULL REFERENCES users(id),
   at TEXT NOT NULL, PRIMARY KEY(corr_id, user_id));
@@ -200,6 +210,10 @@ def init_db():
         for i, (k, label, color, cl, urg) in enumerate(DEFAULT_CLASSES, 1):
             conn.execute("INSERT INTO classifications(key,label,color,conf_level,is_urgent,sort) VALUES(?,?,?,?,?,?)",
                          (k, label, color, cl, urg, i))
+    for table, names in (("folders", DEFAULT_FOLDERS), ("ctypes", DEFAULT_TYPES)):
+        if conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0:
+            for i, n in enumerate(names, 1):
+                conn.execute(f"INSERT INTO {table}(name,sort) VALUES(?,?)", (n, i))
     if conn.execute("SELECT COUNT(*) FROM role_perms").fetchone()[0] == 0:
         for role in ("manager", "clerk", "employee"):
             for perm in PERMS:
@@ -237,9 +251,10 @@ def visible_clause(u, alias="c"):
         return "1=1", []
     conf = f"{a}.conf_level<=?"
     involved = (f"{a}.created_by=? OR {a}.assigned_to=? OR EXISTS(SELECT 1 FROM transfers t "
-                f"WHERE t.corr_id={a}.id AND (t.to_user=? OR t.from_user=?))")
+                f"WHERE t.corr_id={a}.id AND (t.to_user=? OR t.from_user=?)) OR EXISTS(SELECT 1 FROM reply_users ru "
+                f"WHERE ru.corr_id={a}.id AND ru.user_id=?)")
     p = [u["clearance"]]
-    ip = [u["id"], u["id"], u["id"], u["id"]]
+    ip = [u["id"]] * 5
     if can(u, "see_all"):
         return f"({conf})", p
     if u["role"] == "manager" and u["department_id"]:
@@ -472,10 +487,26 @@ def change_password(ctx):
 
 # ───────────────────────── المراسلات ─────────────────────────
 FIELDS = ("c.*, d.name AS department_name, pd.name AS party_dept_name, "
-          "a.full_name AS assignee_name, cr.full_name AS creator_name")
+          "a.full_name AS assignee_name, cr.full_name AS creator_name, fo.name AS folder_name, ct.name AS type_name")
 JOINS = ("FROM correspondences c LEFT JOIN departments d ON d.id=c.department_id "
          "LEFT JOIN departments pd ON pd.id=c.party_dept_id "
-         "LEFT JOIN users a ON a.id=c.assigned_to LEFT JOIN users cr ON cr.id=c.created_by")
+         "LEFT JOIN users a ON a.id=c.assigned_to LEFT JOIN users cr ON cr.id=c.created_by "
+         "LEFT JOIN folders fo ON fo.id=c.folder_id LEFT JOIN ctypes ct ON ct.id=c.type_id")
+
+
+def can_reply(ctx, c):
+    """من يحق له الرد: من لديه صلاحية الإدارة الشاملة، أو المخوّلون بالرد إن حُدّدوا (وإلا كل من يرى المراسلة)."""
+    if can(ctx.user, "manage_all"):
+        return True
+    ids = [r[0] for r in ctx.conn.execute("SELECT user_id FROM reply_users WHERE corr_id=?", (c["id"],))]
+    return ctx.user["id"] in ids if ids else True
+
+
+def mark_replied(ctx, parent_id, ref):
+    ctx.conn.execute("UPDATE reply_users SET status='done', done_at=? WHERE corr_id=? AND status='pending'", (now(), parent_id))
+    ctx.conn.execute("UPDATE correspondences SET status='in_progress', updated_at=? WHERE id=? AND status IN('new','referred')",
+                     (now(), parent_id))
+    audit(ctx, "reply_linked", "correspondence", parent_id, f"تم الرد بالمراسلة {ref}")
 
 
 def like(s):
@@ -511,6 +542,14 @@ def build_filters(ctx):
         where.append(("" if q["read"] == "read" else "NOT ") +
                      "EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?)")
         p.append(u["id"])
+    for key, col in (("folder", "folder_id"), ("type", "type_id")):
+        if q.get(key, "").isdigit():
+            where.append(f"c.{col}=?"); p.append(int(q[key]))
+    if q.get("reply") == "awaiting":
+        where.append("c.needs_reply=1 AND c.status NOT IN('closed','archived') AND NOT EXISTS("
+                     "SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
+    elif q.get("reply") == "replied":
+        where.append("EXISTS(SELECT 1 FROM correspondences r WHERE r.parent_id=c.id)")
     if q.get("has_att") == "1":
         where.append("EXISTS(SELECT 1 FROM attachments x WHERE x.corr_id=c.id)")
     since = {"today": "date('now','localtime')", "week": "date('now','localtime','-6 days')",
@@ -533,6 +572,7 @@ def list_corr(ctx):
     size = min(100, int(ctx.query["size"])) if ctx.query.get("size", "").isdigit() and int(ctx.query["size"]) > 0 else 20
     total = ctx.conn.execute(f"SELECT COUNT(*) {JOINS} WHERE {where}", p).fetchone()[0]
     extra = ("(SELECT COUNT(*) FROM attachments x WHERE x.corr_id=c.id) AS att_count, "
+             "(SELECT COUNT(*) FROM correspondences r WHERE r.parent_id=c.id) AS reply_count, "
              "EXISTS(SELECT 1 FROM reads rd WHERE rd.corr_id=c.id AND rd.user_id=?) AS is_read")
     order = "ASC" if ctx.query.get("sort") == "old" else "DESC"
     rows = ctx.conn.execute(
@@ -607,9 +647,25 @@ def create_corr(ctx):
         if a["clearance"] < conf:
             raise ApiError(400, "المستخدم المُسنَد إليه لا يملك صلاحية لهذه الدرجة من السرية")
     parent = f_int(b, "parent_id")
+    folder_id, type_id = f_int(b, "folder_id"), f_int(b, "type_id")
+    for table, val in (("folders", folder_id), ("ctypes", type_id)):
+        if val is not None and not conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (val,)).fetchone():
+            raise ApiError(400, "المجلد أو نوع المعاملة غير موجود")
+    reply_ids = []
+    if needs_reply:
+        raw = b.get("reply_users") or []
+        if not isinstance(raw, list) or len(raw) > 30 or not all(isinstance(i, int) for i in raw):
+            raise ApiError(400, "قائمة المخوّلين بالرد غير صالحة")
+        for rid in dict.fromkeys(raw):
+            ru = user_row(conn, rid)
+            if ru["clearance"] < conf:
+                raise ApiError(400, f"الموظف {ru['full_name']} لا يملك صلاحية لهذه الدرجة من السرية")
+            reply_ids.append(rid)
     with tx(conn):
         if parent:
-            get_visible(ctx, parent)
+            pc = get_visible(ctx, parent)
+            if not can_reply(ctx, pc):
+                raise ApiError(403, "لست من الموظفين المخوّلين بالرد على هذه المراسلة")
         year = date.today().year
         prefix = ("EXT" if scope == "external" else "INT") + "-" + ("IN" if direction == "incoming" else "OUT")
         key = f"{prefix}-{year}"
@@ -621,13 +677,17 @@ def create_corr(ctx):
         cur = conn.execute(
             "INSERT INTO correspondences(ref_no,scope,direction,subject,summary,party,party_ref,party_dept_id,doc_date,"
             "category,priority,conf_level,status,department_id,assigned_to,due_date,parent_id,created_by,created_at,updated_at,"
-            "needs_reply,deliverer_name,deliverer_phone,deliverer_email,delivery_notes)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "needs_reply,deliverer_name,deliverer_phone,deliverer_email,delivery_notes,folder_id,type_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ref, scope, direction, subject, summary, party, party_ref, pdept, doc_date, category, priority, conf,
              status, dept, assigned, due, parent, u["id"], now(), now(),
-             needs_reply, d_name, d_phone, d_email, d_notes))
+             needs_reply, d_name, d_phone, d_email, d_notes, folder_id, type_id))
         cid = cur.lastrowid
         conn.execute("INSERT INTO reads VALUES(?,?,?)", (cid, u["id"], now()))
+        for rid in reply_ids:
+            conn.execute("INSERT INTO reply_users(corr_id,user_id) VALUES(?,?)", (cid, rid))
+        if parent:
+            mark_replied(ctx, parent, ref)
         if assigned:
             conn.execute("INSERT INTO transfers(corr_id,from_user,to_user,instruction,due_date,created_at) VALUES(?,?,?,?,?,?)",
                          (cid, u["id"], assigned, "إسناد عند التسجيل", due, now()))
@@ -662,7 +722,34 @@ def get_corr(ctx):
         "SELECT at,username,action,detail FROM audit_log WHERE entity='correspondence' AND entity_id=? "
         "AND action<>'view' ORDER BY id", (cid,))]
     c["can_manage"] = can_manage(ctx.user, c)
+    c["can_reply"] = can_reply(ctx, c)
+    c["reply_users"] = [dict(r) for r in conn.execute(
+        "SELECT ru.user_id, ru.status, ru.done_at, u.full_name FROM reply_users ru JOIN users u ON u.id=ru.user_id "
+        "WHERE ru.corr_id=? ORDER BY u.full_name", (cid,))]
     return 200, c
+
+
+@route("POST", r"/api/correspondences/(?P<id>\d+)/link")
+def link_reply(ctx):
+    """ربط مراسلة صادرة قائمة (برقم قيدها) كرد على هذه المراسلة الواردة."""
+    cid = int(ctx.params["id"])
+    parent = get_visible(ctx, cid)
+    ref = f_text(ctx.body, "ref_no", 40, True, "رقم القيد")
+    sql, p = visible_clause(ctx.user)
+    child = ctx.conn.execute(f"SELECT c.* FROM correspondences c WHERE c.ref_no=? AND {sql}", [ref] + p).fetchone()
+    if not child:
+        raise ApiError(404, "لا توجد مراسلة بهذا الرقم ضمن ما يحق لك الاطلاع عليه")
+    if parent["direction"] != "incoming" or child["direction"] != "outgoing":
+        raise ApiError(400, "الربط يكون من وارد (الأصل) إلى صادر (الرد)")
+    if child["id"] == cid or child["parent_id"]:
+        raise ApiError(400, "هذه المراسلة مرتبطة برد سابق أو هي نفسها")
+    if not can_reply(ctx, parent) or not can_manage(ctx.user, child) and child["created_by"] != ctx.user["id"]:
+        raise ApiError(403, "لا تملك صلاحية الربط")
+    with tx(ctx.conn):
+        ctx.conn.execute("UPDATE correspondences SET parent_id=?, updated_at=? WHERE id=?", (cid, now(), child["id"]))
+        audit(ctx, "link", "correspondence", child["id"], f"ربط كرد على {parent['ref_no']}")
+        mark_replied(ctx, cid, child["ref_no"])
+    return 200, {"ok": True}
 
 
 @route("PUT", r"/api/correspondences/(?P<id>\d+)")
@@ -690,6 +777,12 @@ def update_corr(ctx):
     if "due_date" in b:
         dd = f_date(b, "due_date", label="الاستحقاق")
         sets.append("due_date=?"); p.append(dd); notes.append(f"الاستحقاق: {dd}")
+    for col, table in (("folder_id", "folders"), ("type_id", "ctypes")):
+        if col in b:
+            v = f_int(b, col)
+            if v is not None and not conn.execute(f"SELECT 1 FROM {table} WHERE id=?", (v,)).fetchone():
+                raise ApiError(400, "المجلد أو نوع المعاملة غير موجود")
+            sets.append(f"{col}=?"); p.append(v); notes.append(f"{col}={v}")
     if not sets:
         raise ApiError(400, "لا يوجد ما يُحدَّث")
     note = f_text(b, "note", 500)
@@ -748,12 +841,17 @@ def complete_transfer(ctx):
 
 @route("GET", r"/api/tasks")
 def my_tasks(ctx):
+    replies = [dict(r, kind="reply") for r in ctx.conn.execute(
+        "SELECT NULL AS transfer_id, 'مطلوب منك الرد على هذه المراسلة' AS instruction, c.due_date AS transfer_due, "
+        "c.created_at AS transferred_at, c.id, c.ref_no, c.subject, c.priority, c.conf_level, c.status, "
+        "cr.full_name AS from_name FROM reply_users ru JOIN correspondences c ON c.id=ru.corr_id "
+        "JOIN users cr ON cr.id=c.created_by WHERE ru.user_id=? AND ru.status='pending' ORDER BY c.id DESC", (ctx.user["id"],))]
     rows = ctx.conn.execute(
         "SELECT t.id AS transfer_id, t.instruction, t.due_date AS transfer_due, t.created_at AS transferred_at, "
         "c.id, c.ref_no, c.subject, c.priority, c.conf_level, c.status, f.full_name AS from_name "
         "FROM transfers t JOIN correspondences c ON c.id=t.corr_id JOIN users f ON f.id=t.from_user "
         "WHERE t.to_user=? AND t.status='pending' ORDER BY t.id DESC", (ctx.user["id"],)).fetchall()
-    return 200, [dict(r) for r in rows]
+    return 200, [dict(r, kind="transfer") for r in rows] + replies
 
 
 # ───────────────────────── المرفقات ─────────────────────────
@@ -839,8 +937,9 @@ def dashboard(ctx):
         "total": one(), "by_status": by_status, "by_type": by_type, "monthly": monthly, "recent": recent,
         "overdue": one("AND c.due_date IS NOT NULL AND c.due_date<date('now','localtime') AND c.status NOT IN('closed','archived')"),
         "urgent_open": one(f"AND c.priority IN {URGENT} AND c.status NOT IN('closed','archived')"),
-        "my_tasks": conn.execute("SELECT COUNT(*) FROM transfers WHERE to_user=? AND status='pending'",
-                                 (ctx.user["id"],)).fetchone()[0],
+        "my_tasks": conn.execute("SELECT (SELECT COUNT(*) FROM transfers WHERE to_user=? AND status='pending') + "
+                                 "(SELECT COUNT(*) FROM reply_users WHERE user_id=? AND status='pending')",
+                                 (ctx.user["id"], ctx.user["id"])).fetchone()[0],
     }
 
 
@@ -995,6 +1094,7 @@ def reports(ctx):
     def rows(sql, extra=()):
         return [dict(r) for r in conn.execute(sql, p + list(extra))]
     base = ("FROM correspondences c LEFT JOIN departments d ON d.id=c.department_id "
+            "LEFT JOIN ctypes ct ON ct.id=c.type_id LEFT JOIN folders fo ON fo.id=c.folder_id "
             f"LEFT JOIN classifications k ON k.key=c.priority WHERE {where}")
     open_ = "c.status NOT IN('closed','archived')"
     return 200, {
@@ -1007,6 +1107,8 @@ def reports(ctx):
         "by_month": rows(f"SELECT substr(c.doc_date,1,7) AS k, SUM(c.direction='incoming') AS incoming, "
                          f"SUM(c.direction='outgoing') AS outgoing {base} GROUP BY 1 ORDER BY 1"),
         "by_type": rows(f"SELECT c.scope, c.direction, COUNT(*) AS n {base} GROUP BY 1,2"),
+        "by_ctype": rows(f"SELECT COALESCE(ct.name,'بدون نوع') AS k, COUNT(*) AS n {base} GROUP BY c.type_id ORDER BY n DESC"),
+        "by_folder": rows(f"SELECT COALESCE(fo.name,'بدون مجلد') AS k, COUNT(*) AS n {base} GROUP BY c.folder_id ORDER BY n DESC"),
         "top_parties": rows(f"SELECT c.party AS k, COUNT(*) AS n {base} GROUP BY c.party ORDER BY n DESC LIMIT 10"),
         "overdue": conn.execute(f"SELECT COUNT(*) {base} AND c.due_date IS NOT NULL AND c.due_date<date('now','localtime') AND {open_}", p).fetchone()[0],
         "awaiting_reply": conn.execute(f"SELECT COUNT(*) {base} AND c.needs_reply=1 AND {open_} AND NOT EXISTS("
@@ -1014,6 +1116,53 @@ def reports(ctx):
         "avg_close_days": conn.execute(f"SELECT ROUND(AVG(julianday(c.updated_at)-julianday(c.created_at)),1) {base} "
                                        f"AND c.status IN('closed','archived')", p).fetchone()[0],
     }
+
+
+# ───────────── المجلدات وأنواع المعاملات ─────────────
+@route("GET", r"/api/lookups/(?P<kind>folders|types)")
+def lookups_list(ctx):
+    t = LOOKUPS[ctx.params["kind"]]
+    allr = ctx.user["role"] == "admin" and ctx.query.get("all") == "1"
+    rows = ctx.conn.execute(f"SELECT id,name,sort,active FROM {t}" + ("" if allr else " WHERE active=1") + " ORDER BY sort,id")
+    return 200, [dict(r) for r in rows]
+
+
+def lookup_fields(b, creating):
+    out = {}
+    if creating or "name" in b:
+        out["name"] = f_text(b, "name", 80, True, "الاسم")
+    if "sort" in b:
+        out["sort"] = f_int(b, "sort", 0, 1000, True)
+    if "active" in b:
+        out["active"] = 1 if b["active"] else 0
+    return out
+
+
+@route("POST", r"/api/lookups/(?P<kind>folders|types)", roles=("admin",))
+def lookups_add(ctx):
+    t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, True)
+    mx = ctx.conn.execute(f"SELECT COALESCE(MAX(sort),0) FROM {t}").fetchone()[0]
+    try:
+        cur = ctx.conn.execute(f"INSERT INTO {t}(name,sort) VALUES(?,?)", (f["name"], f.get("sort", mx + 1)))
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "الاسم موجود مسبقًا")
+    audit(ctx, "lookup_create", t, cur.lastrowid, f["name"])
+    return 201, {"id": cur.lastrowid}
+
+
+@route("PUT", r"/api/lookups/(?P<kind>folders|types)/(?P<id>\d+)", roles=("admin",))
+def lookups_edit(ctx):
+    t, f = LOOKUPS[ctx.params["kind"]], lookup_fields(ctx.body, False)
+    if not f:
+        raise ApiError(400, "لا يوجد ما يُحدَّث")
+    try:
+        cur = ctx.conn.execute(f"UPDATE {t} SET {','.join(k + '=?' for k in f)} WHERE id=?", list(f.values()) + [int(ctx.params["id"])])
+    except sqlite3.IntegrityError:
+        raise ApiError(409, "الاسم موجود مسبقًا")
+    if not cur.rowcount:
+        raise ApiError(404, "غير موجود")
+    audit(ctx, "lookup_update", t, int(ctx.params["id"]), json.dumps(f, ensure_ascii=False))
+    return 200, {"ok": True}
 
 
 @route("GET", r"/api/users")

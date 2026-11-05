@@ -11,11 +11,12 @@ const L = {
   direction: { incoming: "وارد", outgoing: "صادر" },
   action: { create: "تسجيل المراسلة", update: "تحديث", transfer: "إحالة", transfer_done: "تنفيذ إحالة", attach: "إضافة مرفق",
     download: "تنزيل مرفق", login: "دخول", logout: "خروج", login_failed: "فشل دخول", export: "تصدير", password_changed: "تغيير كلمة المرور",
-    user_create: "إنشاء مستخدم", user_update: "تعديل مستخدم", dept_create: "إنشاء إدارة", apikey_create: "إنشاء مفتاح API",
+    reply_linked: "تسجيل رد / ربط صادر", link: "ربط كرد", lookup_create: "إضافة مجلد/نوع", lookup_update: "تعديل مجلد/نوع",
+    class_create: "إضافة تصنيف", class_update: "تعديل تصنيف", perm_update: "تعديل صلاحية", dept_update: "تعديل وحدة", user_create: "إنشاء مستخدم", user_update: "تعديل مستخدم", dept_create: "إنشاء إدارة", apikey_create: "إنشاء مفتاح API",
     apikey_revoke: "إلغاء مفتاح API", webhook_create: "إنشاء Webhook", webhook_delete: "حذف Webhook", integrity_failure: "فشل سلامة ملف" },
 };
 
-const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {} };
+const state = { token: sessionStorage.getItem("acp_token"), user: null, depts: [], users: [], cls: [], clsMap: {}, folders: [], types: [] };
 
 // ───────── أدوات ─────────
 function h(tag, attrs, ...kids) {
@@ -72,6 +73,13 @@ const isStaff = () => ["admin", "manager", "clerk"].includes(state.user.role);
 const can = (p) => state.user.role === "admin" || (state.user.perms || []).includes(p);
 const activeDepts = () => state.depts.filter((d) => d.active);
 const deptOptions = () => Object.fromEntries(activeDepts().map((d) => [d.id, d.name]));
+// حالة الرد: للوارد الذي يحتاج رد → «بانتظار الرد» أو «تم الرد»؛ وللصادر المرتبط بوارد → «رد على…»
+function replyBadge(c) {
+  if (c.reply_count > 0) return pill("closed", `✔ تم الرد (${c.reply_count})`);
+  if (c.needs_reply && !["closed", "archived"].includes(c.status)) return pill("in_progress", "⏳ بانتظار الرد");
+  if (c.parent_id) return h("a", { href: "#/c/" + c.parent_id, class: "small" }, "↩ رد على وارد");
+  return "—";
+}
 function prioPill(key) {
   const c = state.clsMap[key];
   const el = pill("", c ? c.label : key);
@@ -198,7 +206,7 @@ function corrTable(items, compact) {
 
 
 async function listView(q) {
-  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size"];
+  const filters = ["scope", "direction", "status", "priority", "dept", "q", "from", "to", "overdue", "mine", "read", "has_att", "period", "sort", "size", "folder", "type", "reply"];
   const params = new URLSearchParams();
   filters.forEach((k) => q.get(k) && params.set(k, q.get(k)));
   const page = Number(q.get("page") || 1);
@@ -229,10 +237,13 @@ async function listView(q) {
       dd("read", "حالة القراءة", { "": "حالة القراءة", unread: "غير مقروءة", read: "مقروءة" }),
       dd("has_att", "المرفقات", { "": "المرفقات", 1: "مع مرفقات" }),
       dd("period", "الفترة الزمنية", { "": "الفترة الزمنية", today: "اليوم", week: "آخر 7 أيام", month: "آخر شهر", year: "آخر سنة" }),
+      dd("reply", "حالة الرد", { "": "حالة الرد", awaiting: "بانتظار الرد", replied: "تم الرد عليها" }),
       dd("sort", "الترتيب", { "": "الأحدث أولًا", old: "الأقدم أولًا" })),
-    h("details", { class: "more", open: !!(q.get("scope") || q.get("dept") || q.get("from") || q.get("to")) },
+    h("details", { class: "more", open: !!(q.get("scope") || q.get("dept") || q.get("from") || q.get("to") || q.get("type") || q.get("folder")) },
       h("summary", {}, "مزيد من الفلاتر"),
       h("div", { class: "frow" },
+        dd("type", "نوع المعاملة", { "": "كل أنواع المعاملات", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }),
+        dd("folder", "المجلد", { "": "كل المجلدات", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }),
         dd("scope", "نوع البريد", { "": "داخلي وخارجي", ...L.scope }), dd("dept", "الإدارة", depts),
         h("input", { type: "date", name: "from", "aria-label": "من تاريخ", value: q.get("from") || "", onchange: apply }),
         h("input", { type: "date", name: "to", "aria-label": "إلى تاريخ", value: q.get("to") || "", onchange: apply }),
@@ -268,11 +279,13 @@ async function listView(q) {
       h("td", {}, cb),
       h("td", { class: "nowrap" }, h("span", { class: "dot " + (c.is_read ? "r" : "u") }), c.is_read ? "مقروءة" : "غير مقروءة"),
       h("td", {}, c.party, h("div", { class: "small muted" }, typeLabel(c))),
-      h("td", { class: "subj" }, h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null),
+      h("td", { class: "subj" }, h("a", { href: "#/c/" + c.id }, c.subject), c.conf_level ? [" ", pill("conf" + c.conf_level, L.conf[c.conf_level])] : null,
+        c.type_name || c.folder_name ? h("div", { class: "small muted" }, [c.type_name, c.folder_name && "📁 " + c.folder_name].filter(Boolean).join(" • ")) : null),
       h("td", { class: "ltr nowrap" }, c.ref_no),
       h("td", { class: "nowrap" }, c.created_at.slice(0, 10).replaceAll("-", "/"), h("div", { class: "small muted" }, timeOf(c.created_at))),
       h("td", {}, prioPill(c.priority)),
       h("td", {}, statusPill(c.status)),
+      h("td", { class: "nowrap" }, replyBadge(c)),
       h("td", { class: "nowrap" }, c.att_count ? `📎 ${c.att_count}` : "—"),
       h("td", { class: "acts" },
         h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "عرض", "aria-label": "عرض" }, "👁"),
@@ -280,7 +293,7 @@ async function listView(q) {
         h("a", { class: "iconbtn", href: "#/c/" + c.id, title: "إحالة", "aria-label": "إحالة" }, "↪")));
   });
   const table = rows.length ? h("div", { class: "tbl-wrap" }, h("table", { class: "mail" },
-    h("thead", {}, h("tr", {}, h("th", {}, all), ["حالة القراءة", "المرسل / الجهة", "موضوع الرسالة", "رقم المعاملة", "تاريخ الاستلام", "الأولوية", "حالة المعاملة", "المرفقات", "الإجراءات"].map((t) => h("th", {}, t)))),
+    h("thead", {}, h("tr", {}, h("th", {}, all), ["حالة القراءة", "المرسل / الجهة", "موضوع الرسالة", "رقم المعاملة", "تاريخ الاستلام", "التصنيف", "حالة المعاملة", "الرد", "المرفقات", "الإجراءات"].map((t) => h("th", {}, t)))),
     h("tbody", {}, rows))) : h("div", { class: "card empty" }, "لا توجد مراسلات مطابقة");
 
   const pages = Math.max(1, Math.ceil(data.total / data.size));
@@ -327,7 +340,9 @@ async function tasksView() {
             t.priority !== "normal" ? prioPill(t.priority) : null, t.conf_level ? pill("conf" + t.conf_level, L.conf[t.conf_level]) : null),
           h("p", { class: "muted small" }, `من: ${t.from_name} — ${fmtDT(t.transferred_at)}`, t.transfer_due ? ` — الاستحقاق: ${t.transfer_due}` : ""),
           t.instruction ? h("p", {}, "التوجيه: ", t.instruction) : null,
-          h("div", { class: "row" }, note, h("button", { class: "btn", onclick: async () => {
+          t.kind === "reply" ? h("div", { class: "row" }, h("a", { class: "btn", href: `#/new?parent=${t.id}&direction=outgoing&subject=${encodeURIComponent("رد: " + t.subject)}` }, "تسجيل الرد"),
+            h("a", { class: "btn ghost", href: "#/c/" + t.id }, "فتح المراسلة"))
+          : h("div", { class: "row" }, note, h("button", { class: "btn", onclick: async () => {
             try { await api(`/transfers/${t.transfer_id}/complete`, { method: "POST", body: { note: note.value } }); toast("تم تسجيل التنفيذ"); render(); }
             catch (e) { toast(e.message, true); }
           } }, "تم الاطلاع / التنفيذ")));
@@ -361,10 +376,17 @@ function newView(q) {
   const classes = h("div", { class: "classes", role: "group", "aria-label": "تصنيف الوثيقة" },
     state.cls.filter((c) => c.conf_level <= state.user.clearance).map((c) => radio("priority", c.key, c.label, c.key === "normal")));
 
+  // الموظفون الذين يحق لهم الرد على الخطاب الوارد (لا يظهر إلا عند اختيار «تحتاج إلى رد: نعم»)
+  const replyBox = h("div", { class: "classes replyers", hidden: true, role: "group", "aria-label": "المخوّلون بالرد" },
+    h("div", { class: "small muted full" }, "اختر الموظفين المسموح لهم بالرد؛ إن لم تختر أحدًا فيحق الرد لكل من يطّلع على المراسلة."),
+    state.users.filter((u) => u.active !== false).map((u) => h("label", { class: "opt" },
+      h("input", { type: "checkbox", name: "reply_user", value: u.id }), u.full_name, u.job_title ? h("span", { class: "muted small" }, ` (${u.job_title})`) : null)));
+
   const form = h("form", { class: "card fm", onsubmit: async (e) => {
     e.preventDefault(); err.textContent = "";
     const body = { direction: dir, scope: form.elements.scope.value, priority: form.elements.priority.value, needs_reply: Number(form.elements.needs_reply.value) };
-    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "category", "department_id", "party_dept_id", "assigned_to",
+    if (body.needs_reply) body.reply_users = [...form.querySelectorAll("input[name=reply_user]:checked")].map((x) => Number(x.value));
+    for (const n of ["subject", "party", "summary", "party_ref", "doc_date", "due_date", "type_id", "folder_id", "department_id", "party_dept_id", "assigned_to",
       "deliverer_name", "deliverer_phone", "deliverer_email", "delivery_notes"]) {
       const el = form.elements[n]; if (el && el.value !== "") body[n] = el.value;
     }
@@ -383,12 +405,16 @@ function newView(q) {
       canExternal ? radio("scope", "external", "خارجي", (q.get("scope") || "external") === "external") : null,
       radio("scope", "internal", "داخلي", !canExternal || q.get("scope") === "internal"))),
     row("الموضوع", h("input", { name: "subject", required: true, maxlength: 300, placeholder: "الموضوع", value: q.get("subject") || "" }), true),
-    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة" }), true),
+    row(dl("واردة من", "صادرة إلى"), h("input", { name: "party", required: true, maxlength: 200, placeholder: "اسم الجهة / الإدارة", value: q.get("party") || "" }), true),
     row("الرسالة", h("textarea", { name: "summary", maxlength: 5000, placeholder: "الرسالة" })),
     row("الرقم المتسلسل للمراسلة", h("input", { name: "party_ref", maxlength: 100, placeholder: "حروف وأرقام" })),
     row("المرفق", h("input", { type: "file", name: "file" })),
     row(h("span", {}, "تصنيف الوثيقة"), classes),
-    row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" }, radio("needs_reply", "1", "نعم", false), radio("needs_reply", "0", "لا", true))),
+    row("نوع المعاملة", sel("type_id", { "": "— اختر —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, "")),
+    row("المجلد", sel("folder_id", { "": "— بدون مجلد —", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }, "")),
+    row(h("span", {}, "تحتاج إلى رد"), h("div", { class: "classes" },
+      radio("needs_reply", "1", "نعم", false, () => (replyBox.hidden = false)), radio("needs_reply", "0", "لا", true, () => (replyBox.hidden = true)))),
+    row(h("span", {}, "المخوّلون بالرد"), replyBox),
     h("details", { class: "more2" },
       h("summary", {}, dl("معلومات إضافية عن حالة التوريد (المزيد)", "معلومات إضافية عن حالة الإصدار (المزيد)", "")),
       row(dl("اسم مسلّم المراسلة", "اسم مستلم المراسلة"), h("input", { name: "deliverer_name", maxlength: 100, placeholder: "الاسم" })),
@@ -397,7 +423,6 @@ function newView(q) {
       row("تاريخ المراسلة", h("input", { type: "date", name: "doc_date", required: true, value: today() }), true),
       row("تاريخ الاستحقاق", h("input", { type: "date", name: "due_date" })),
       row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" })),
-      row("التصنيف الموضوعي", h("input", { name: "category", maxlength: 60, placeholder: "مثال: عقود، شكاوى، تعاميم" })),
       can("see_all") ? row("الوحدة المسؤولة", sel("department_id", deptOptions(), state.user.department_id)) : null,
       row("الإدارة المعنية (للداخلي)", sel("party_dept_id", deptOpts, "")),
       row("إسناد إلى", sel("assigned_to", { "": "— بدون إسناد —", ...Object.fromEntries(state.users.filter((u) => u.id !== state.user.id).map((u) => [u.id, u.full_name])) }, ""))),
@@ -430,10 +455,12 @@ async function detailView(id) {
 
   const statusSel = sel("status", L.status, c.status);
   const prioSel = sel("priority", L.priority, c.priority);
+  const typeSel = sel("type_id", { "": "— نوع المعاملة —", ...Object.fromEntries(state.types.map((t) => [t.id, t.name])) }, c.type_id || "", { "aria-label": "نوع المعاملة" });
+  const folderSel = sel("folder_id", { "": "— المجلد —", ...Object.fromEntries(state.folders.map((t) => [t.id, t.name])) }, c.folder_id || "", { "aria-label": "المجلد" });
   const noteIn = h("input", { placeholder: "ملاحظة (اختياري)" });
   const manage = c.can_manage ? h("div", { class: "card" }, h("h3", {}, "إجراءات"),
-    h("div", { class: "row" }, statusSel, prioSel, noteIn, h("button", { class: "btn", onclick: async () => {
-      try { await api("/correspondences/" + id, { method: "PUT", body: { status: statusSel.value, priority: prioSel.value, note: noteIn.value } }); toast("تم التحديث"); render(); }
+    h("div", { class: "row" }, statusSel, prioSel, typeSel, folderSel, noteIn, h("button", { class: "btn", onclick: async () => {
+      try { await api("/correspondences/" + id, { method: "PUT", body: { status: statusSel.value, priority: prioSel.value, type_id: typeSel.value || null, folder_id: folderSel.value || null, note: noteIn.value } }); toast("تم التحديث"); render(); }
       catch (e) { toast(e.message, true); }
     } }, "تحديث"))) : null;
 
@@ -446,6 +473,18 @@ async function detailView(id) {
       catch (e) { toast(e.message, true); }
     } }, "إحالة"))) : null;
 
+  // ربط الوارد بالصادر ومتابعة الرد
+  const refIn = h("input", { placeholder: "رقم قيد الصادر، مثل EXT-OUT-2026-00001", dir: "ltr", "aria-label": "رقم قيد الصادر" });
+  const replyCard = c.direction === "incoming" ? h("div", { class: "card" }, h("h3", {}, "الرد على هذه المراسلة"),
+    h("div", { class: "row" }, c.replies.length ? pill("closed", `✔ تم الرد (${c.replies.length})`) : c.needs_reply ? pill("in_progress", "⏳ بانتظار الرد") : pill("archived", "لا تحتاج رد")),
+    c.replies.length ? h("ul", { class: "tl" }, c.replies.map((r) => h("li", {}, h("a", { href: "#/c/" + r.id, class: "ltr" }, r.ref_no), " — ", r.subject, h("span", { class: "small muted" }, ` (${fmtDate(r.doc_date)})`)))) : null,
+    c.reply_users.length ? h("p", { class: "small" }, h("strong", {}, "المخوّلون بالرد: "), c.reply_users.map((u, i) => [i ? "، " : "", u.full_name, u.status === "done" ? " ✔" : " ⏳"])) : null,
+    c.can_reply ? h("div", { class: "row" }, refIn, h("button", { class: "btn sm", onclick: async () => {
+      if (!refIn.value.trim()) return toast("اكتب رقم قيد المراسلة الصادرة", true);
+      try { await api(`/correspondences/${id}/link`, { method: "POST", body: { ref_no: refIn.value.trim() } }); toast("تم ربط الرد"); render(); }
+      catch (e) { toast(e.message, true); }
+    } }, "ربط صادر قائم كرد")) : null) : null;
+
   const fileIn = h("input", { type: "file" });
   return [
     h("div", { class: "row" }, h("h2", {}, c.subject), statusPill(c.status), c.priority !== "normal" ? prioPill(c.priority) : null,
@@ -455,7 +494,7 @@ async function detailView(id) {
       m("الجهة", c.party), m("رقم مرجع الجهة", c.party_ref || "—"),
       m("تاريخ المراسلة", [fmtDate(c.doc_date), h("div", { class: "small muted" }, hijri(c.doc_date))]),
       m("الاستحقاق", c.due_date || "—"), m("الإدارة المسؤولة", c.department_name || "—"), m("الإدارة المعنية", c.party_dept_name || "—"),
-      m("المسؤول الحالي", c.assignee_name || "—"), m("التصنيف", c.category || "—"),
+      m("المسؤول الحالي", c.assignee_name || "—"), m("نوع المعاملة", c.type_name || c.category || "—"), m("المجلد", c.folder_name || "—"),
       m("تحتاج إلى رد", c.needs_reply ? "نعم" : "لا"),
       c.deliverer_name ? m(c.direction === "incoming" ? "مسلّم المراسلة" : "مستلم المراسلة", c.deliverer_name) : null,
       c.deliverer_phone ? m("رقم الجوال", h("span", { class: "ltr" }, c.deliverer_phone)) : null,
@@ -464,9 +503,9 @@ async function detailView(id) {
       m("سُجّلت بواسطة", `${c.creator_name} — ${fmtDT(c.created_at)}`),
       c.parent ? m("رد على", h("a", { href: "#/c/" + c.parent.id }, c.parent.ref_no)) : null),
       c.summary ? h("p", {}, h("strong", {}, "الملخص: "), c.summary) : null,
-      h("div", { class: "row" }, h("a", { class: "btn ghost sm", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&subject=${encodeURIComponent("رد: " + c.subject)}` }, "تسجيل رد"),
+      h("div", { class: "row" }, c.can_reply ? h("a", { class: "btn ghost sm", href: `#/new?parent=${c.id}&scope=${c.scope}&direction=${c.direction === "incoming" ? "outgoing" : "incoming"}&party=${encodeURIComponent(c.party)}&subject=${encodeURIComponent("رد: " + c.subject)}` }, "تسجيل رد") : null,
         h("button", { class: "btn ghost sm", onclick: () => window.print() }, "طباعة"))),
-    manage, transferBox,
+    replyCard, manage, transferBox,
     h("div", { class: "card" }, h("h3", {}, `المرفقات (${c.attachments.length})`),
       c.attachments.length ? h("table", {}, h("tbody", {}, c.attachments.map((a) => h("tr", {},
         h("td", {}, h("a", { href: "#", onclick: (e) => { e.preventDefault(); dl(a); } }, a.filename)), h("td", {}, sizeStr(a.size)),
@@ -522,7 +561,8 @@ async function integrationView() {
 
 // ───────── التوجيه ─────────
 async function loadRefs() {
-  [state.depts, state.users, state.cls] = await Promise.all([api("/departments"), api("/users"), api("/classifications")]);
+  [state.depts, state.users, state.cls, state.folders, state.types] = await Promise.all([
+    api("/departments"), api("/users"), api("/classifications"), api("/lookups/folders"), api("/lookups/types")]);
   state.clsMap = Object.fromEntries(state.cls.map((c) => [c.key, c]));
   // الأولويات المعطّلة تبقى معروضة للمراسلات القديمة
   if (state.user.role === "admin") {

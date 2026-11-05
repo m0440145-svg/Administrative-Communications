@@ -2,7 +2,7 @@
 // لوحة التحكم (الوحدات، الموظفون، التصنيفات والخصوصية، الصلاحيات) والتقارير.
 // تعتمد على الدوال العامة في app.js (h, api, toast, f, sel, pill, state, L ...) وتُستدعى بعد تحميل الصفحة.
 
-const ADMIN_TABS = [["units", "الوحدات"], ["staff", "الموظفون"], ["classes", "التصنيفات والخصوصية"], ["perms", "الصلاحيات"], ["audit", "سجل التدقيق"], ["integration", "التكامل"]];
+const ADMIN_TABS = [["units", "الوحدات"], ["staff", "الموظفون"], ["classes", "التصنيفات والخصوصية"], ["folders", "المجلدات"], ["types", "أنواع المعاملات"], ["perms", "الصلاحيات"], ["audit", "سجل التدقيق"], ["integration", "التكامل"]];
 
 function adminHead(current, title, note) {
   return [h("h2", {}, "لوحة التحكم"),
@@ -125,7 +125,33 @@ async function permsView() {
     h("p", { class: "small muted" }, "تسري التغييرات على المستخدمين عند دخولهم التالي أو فور تحديث الصفحة.")];
 }
 
-const ADMIN_VIEWS = { units: unitsView, staff: staffView, classes: classesView, perms: permsView };
+// ───────── المجلدات وأنواع المعاملات (قوائم بسيطة يديرها المدير) ─────────
+function lookupView(kind, title, note, placeholder) {
+  return async () => {
+    const rows = await api(`/lookups/${kind}?all=1`);
+    const nm = h("input", { placeholder, maxlength: 80, "aria-label": placeholder });
+    const trow = (r) => {
+      const name = h("input", { value: r.name, maxlength: 80, "aria-label": "الاسم" });
+      const sort = h("input", { type: "number", value: r.sort, min: 0, max: 1000, class: "narrow", "aria-label": "الترتيب" });
+      const act = h("input", { type: "checkbox", checked: !!r.active, "aria-label": "نشط" });
+      return h("tr", {}, h("td", {}, name), h("td", {}, sort), h("td", {}, act), h("td", {}, h("button", { class: "btn sm", onclick: guard(async () => {
+        await api(`/lookups/${kind}/${r.id}`, { method: "PUT", body: { name: name.value, sort: Number(sort.value), active: act.checked } });
+        toast("تم الحفظ"); await loadRefs(); render();
+      }) }, "حفظ")));
+    };
+    return [adminHead(kind, title, note),
+      h("div", { class: "card row" }, nm, h("button", { class: "btn", onclick: guard(async () => {
+        await api(`/lookups/${kind}`, { method: "POST", body: { name: nm.value } }); toast("تمت الإضافة"); await loadRefs(); render();
+      }) }, "إضافة")),
+      h("div", { class: "tbl-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ["الاسم", "الترتيب", "نشط", ""].map((t) => h("th", {}, t)))), h("tbody", {}, rows.map(trow))))];
+  };
+}
+
+const ADMIN_VIEWS = {
+  units: unitsView, staff: staffView, classes: classesView, perms: permsView,
+  folders: lookupView("folders", "المجلدات", "المجلد هو مكان حفظ المراسلة في الأرشيف (مثل: التعاميم، العقود). يُختار عند التسجيل ويمكن تغييره لاحقًا ويُفلتر به.", "اسم المجلد الجديد"),
+  types: lookupView("types", "أنواع المعاملات", "نوع المعاملة يصف موضوع الخطاب (طلب، شكوى، تعميم…) ويظهر في القوائم والتقارير. تعطيل نوع لا يؤثر على المراسلات القديمة.", "اسم نوع المعاملة الجديد"),
+};
 
 // ───────── التقارير ─────────
 async function reportsView(q) {
@@ -167,5 +193,7 @@ async function reportsView(q) {
       sec("حسب النوع", bars([["خارجي", "external", "incoming"], ["خارجي", "external", "outgoing"], ["داخلي", "internal", "incoming"], ["داخلي", "internal", "outgoing"]]
         .map(([t, s, dr]) => ({ k: `${L.direction[dr]} ${t}`, n: type(s, dr) })), (r) => r.k, (r) => r.n)),
       sec("الحركة الشهرية (وارد / صادر)", bars(d.by_month, (r) => `${r.k}  (وارد ${r.incoming} · صادر ${r.outgoing})`, (r) => r.incoming + r.outgoing)),
+      sec("حسب نوع المعاملة", bars(d.by_ctype, (r) => r.k, (r) => r.n)),
+      sec("حسب المجلد", bars(d.by_folder, (r) => r.k, (r) => r.n)),
       sec("أكثر الجهات مراسلةً", bars(d.top_parties, (r) => r.k, (r) => r.n)))];
 }

@@ -250,6 +250,49 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(call("GET", "/api/reports", token=self.tok["emp1"])[0], 403)
         self.assertEqual(call("GET", "/api/reports?direction=outgoing&from=2026-01-01&to=2026-12-31", token=self.admin)[0], 200)
 
+    def test_09f_folders_types_reply_tracking(self):
+        a, c1 = self.admin, self.tok["clerk1"]
+        fl = call("GET", "/api/lookups/folders", token=c1)[1]
+        ty = call("GET", "/api/lookups/types", token=c1)[1]
+        self.assertTrue(fl and ty)
+        self.assertEqual(call("POST", "/api/lookups/folders", {"name": "مجلد جديد"}, c1)[0], 403)
+        self.assertEqual(call("POST", "/api/lookups/types", {"name": "نوع جديد"}, a)[0], 201)
+        self.assertEqual(call("POST", "/api/lookups/types", {"name": "نوع جديد"}, a)[0], 409)
+        # وارد يحتاج رد، والمخوّل بالرد emp1 فقط
+        s, d, _ = self.corr(c1, needs_reply=1, reply_users=[self.uid["emp1"]], folder_id=fl[0]["id"], type_id=ty[0]["id"], subject="يحتاج رد")
+        self.assertEqual(s, 201)
+        cid = d["id"]
+        det = call("GET", f"/api/correspondences/{cid}", token=self.tok["emp1"])  # صار مرئيًا للمخوّل
+        self.assertEqual(det[0], 200)
+        self.assertTrue(det[1]["can_reply"])
+        self.assertEqual((det[1]["folder_name"], det[1]["type_name"]), (fl[0]["name"], ty[0]["name"]))
+        self.assertEqual(call("GET", "/api/tasks", token=self.tok["emp1"])[1][0]["kind"], "reply")
+        lst = call("GET", "/api/correspondences?reply=awaiting", token=c1)[1]
+        self.assertTrue(any(i["id"] == cid and i["reply_count"] == 0 for i in lst["items"]))
+        # غير المخوّل (مدير الإدارة بلا manage_all؟ هو يملكها) → نستخدم موظفًا آخر ليس له صلاحية
+        s, _, _ = call("POST", "/api/correspondences", dict(scope="internal", direction="outgoing", subject="رد", party="x",
+                       doc_date="2026-11-05", parent_id=cid), self.tok["emp2"])
+        self.assertEqual(s, 404)  # لا يراها أصلًا
+        # الرد من المخوّل
+        s, r, _ = call("POST", "/api/correspondences", dict(scope="internal", direction="outgoing", subject="رد", party="x",
+                       doc_date="2026-11-05", parent_id=cid), self.tok["emp1"])
+        self.assertEqual(s, 201)
+        det = call("GET", f"/api/correspondences/{cid}", token=c1)[1]
+        self.assertEqual([r["status"] for r in det["reply_users"]], ["done"])
+        self.assertEqual(det["replies"][0]["id"], r["id"])
+        self.assertEqual(call("GET", "/api/correspondences?reply=replied", token=c1)[1]["items"][0]["id"], cid)
+        self.assertEqual(call("GET", "/api/tasks", token=self.tok["emp1"])[1], [])
+        # ربط صادر قائم بوارد آخر
+        s, d2, _ = self.corr(c1, subject="وارد ثانٍ")
+        s, out, _ = call("POST", "/api/correspondences", dict(scope="external", direction="outgoing", subject="صادر مستقل",
+                         party="y", doc_date="2026-11-05"), c1)
+        ref = call("GET", f"/api/correspondences/{out['id']}", token=c1)[1]["ref_no"]
+        self.assertEqual(call("POST", f"/api/correspondences/{d2['id']}/link", {"ref_no": ref}, c1)[0], 200)
+        self.assertEqual(call("POST", f"/api/correspondences/{d2['id']}/link", {"ref_no": ref}, c1)[0], 400)  # مرتبط مسبقًا
+        self.assertEqual(call("POST", f"/api/correspondences/{d2['id']}/link", {"ref_no": "NOPE"}, c1)[0], 404)
+        self.assertEqual(call("PUT", f"/api/correspondences/{d2['id']}", {"folder_id": fl[1]["id"]}, c1)[0], 200)
+        self.assertGreater(len(call("GET", "/api/reports", token=a)[1]["by_ctype"]), 0)
+
     def test_10_dashboard(self):
         d = call("GET", "/api/dashboard", token=self.tok["clerk1"])[1]
         self.assertGreater(d["total"], 0)
