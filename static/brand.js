@@ -37,7 +37,7 @@ async function loadBrand() {
 }
 new MutationObserver(applyBrandColors).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyBrandColors); } catch { /* */ }
-const brandReady = loadBrand().then(() => { if (typeof render === "function" && typeof state !== "undefined" && state.user) render(); });
+const brandReady = loadBrand().then(() => { if (typeof render !== "function" || typeof state === "undefined") return; const typed = (document.getElementById("u") || {}).value || (document.getElementById("p") || {}).value; if (state.user || !typed) render(); });
 
 function brandLogo(cls) {
   return BRAND.logo ? h("img", { class: cls || "brandlogo", src: "/api/public/logo?v=" + encodeURIComponent(BRAND.logo_v), alt: BRAND.name ? "شعار " + BRAND.name : "شعار الجهة" }) : null;

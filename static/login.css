@@ -1,0 +1,17 @@
+/* صفحة الدخول */
+.lg-page{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);min-height:100vh;min-height:100dvh}
+.lg-brand{background:linear-gradient(160deg,var(--side),color-mix(in srgb,var(--side) 70%,var(--brand-2)));color:#fff;display:flex;align-items:center;padding:48px 56px}
+.lg-brand-in{max-width:520px}
+.lg-logo{display:inline-flex;background:#fff;border-radius:14px;padding:10px;margin-bottom:20px}.lg-logo-img{max-height:72px;max-width:200px;object-fit:contain;display:block}
+.lg-brand h1{font-size:30px;line-height:1.4;margin:0 0 6px}.lg-tag{font-size:17px;opacity:.92;margin:0 0 14px}.lg-msg{background:#ffffff22;border-radius:10px;padding:10px 14px;margin:0 0 18px}
+.lg-feats{list-style:none;margin:22px 0 0;padding:0;display:grid;gap:14px}.lg-feats li{display:flex;gap:12px;align-items:flex-start;line-height:1.7}.lg-feats svg{flex:none;margin-top:3px;opacity:.95}
+.lg-main{display:flex;align-items:center;justify-content:center;padding:32px 20px;background:var(--bg)}
+.lg-card{width:100%;max-width:420px;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);padding:30px}
+.lg-form h2{margin:0 0 4px;font-size:24px}.lg-form .field label{display:block;margin-bottom:6px;font-size:15px;color:var(--ink);font-weight:600}
+.lg-form input{width:100%;min-height:46px;font-size:16px;border-radius:10px}
+.lg-pw{position:relative}.lg-pw input{padding-inline-end:48px}
+.lg-eye{position:absolute;inset-inline-end:2px;top:2px;width:44px;height:42px;border:0;background:transparent;color:var(--muted);cursor:pointer;border-radius:8px;display:flex;align-items:center;justify-content:center}.lg-eye:hover{color:var(--ink)}
+.lg-err{color:var(--danger);font-size:15px;min-height:22px;margin:6px 0}.lg-hint{color:var(--accent);font-size:14px;margin-top:4px}
+.lg-submit{width:100%;min-height:48px;font-size:17px;border-radius:10px}.lg-submit:disabled{opacity:.6;cursor:progress}
+.lg-help,.lg-note{text-align:center;margin:14px 0 0}.lg-note{border-top:1px solid var(--line);padding-top:14px;margin-top:20px}
+@media (max-width:860px){.lg-page{grid-template-columns:1fr}.lg-brand{padding:28px 22px}.lg-feats{display:none}.lg-brand h1{font-size:24px}.lg-main{align-items:flex-start;padding-top:20px}}
