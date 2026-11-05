@@ -1,7 +1,7 @@
 // عامل خدمة مبسّط لتمكين تثبيت المنصة كتطبيق (PWA). لا يخزّن أي بيانات من الواجهة البرمجية أبدًا (بيانات حساسة)،
 // ويخزّن فقط ملفات الواجهة الثابتة للعمل السريع، مع تفضيل الشبكة دائمًا لضمان أحدث نسخة.
-const CACHE = "acp-shell-v7";
-const SHELL = ["/", "/style.css", "/app.js", "/admin.js", "/ext.js", "/ext2.js", "/brand.js", "/harden.js", "/home.js", "/login.js", "/login.css", "/icon.svg", "/manifest.json"];
+const CACHE = "acp-shell-v8";
+const SHELL = ["/", "/style.css", "/app.js", "/admin.js", "/ext.js", "/ext2.js", "/brand.js", "/harden.js", "/home.js", "/login.js", "/login.css", "/scan.js", "/icon.svg", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

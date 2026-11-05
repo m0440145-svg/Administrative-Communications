@@ -108,6 +108,7 @@ function detailTools(c) {
     h("button", { class: "btn ghost sm", onclick: async () => { try { await api(`/correspondences/${c.id}/pin`, { method: "POST", body: { pinned: !c.pinned } }); render(); } catch (e) { toast(e.message, true); } } }, c.pinned ? "★ مثبّتة" : "☆ تثبيت"),
     h("a", { class: "btn ghost sm", href: "#/dossier/" + c.id }, "📂 الملف الموحّد"),
     h("a", { class: "btn ghost sm", href: "#/label/" + c.id }, "🏷 ملصق QR"),
+    h("a", { class: "btn ghost sm", href: "#/label/" + c.id + "?print=1", title: "طباعة باركود المعاملة مباشرة" }, "🖨 طباعة الباركود"),
     c.direction === "outgoing" ? h("a", { class: "btn ghost sm", href: "#/letter/" + c.id }, "📄 الخطاب الرسمي") : null,
     h("button", { class: "btn ghost sm", onclick: () => { try { localStorage.setItem("acp_split", split ? "0" : "1"); } catch { /* */ } render(); } }, split ? "▣ إلغاء العرض المقسّم" : "◫ عرض مقسّم"),
   ];

@@ -305,3 +305,14 @@ body.privacy .sens:hover a,body.privacy .sens:hover strong,body.privacy .sens:fo
 kbd{background:var(--brand-soft);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1px 8px;font-family:Consolas,monospace;direction:ltr;display:inline-block}
 @media (prefers-reduced-motion:reduce){.skel{animation:none}}
 @media (max-width:700px){.quick .btn{flex:1 1 45%;text-align:center}.home-head{flex-direction:column}}
+
+/* المسح والاستلام وطباعة الباركود */
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.dropzone{border:2px dashed var(--line);border-radius:12px;padding:34px 16px;text-align:center;cursor:pointer;margin-bottom:12px;transition:border-color .15s,background .15s}
+.dropzone:hover,.dropzone:focus-visible,.dropzone.over{border-color:var(--brand-2);background:var(--brand-soft)}.dz-t{font-size:17px;font-weight:600;margin-bottom:4px}
+.lb-grid{display:flex;flex-wrap:wrap;gap:8px}
+.label-sheet.lb-m{width:90mm;min-height:55mm;page:label-m}.label-sheet.lb-l{width:100mm;min-height:70mm;page:label-l;padding:3mm}
+.lb-m .lb-top svg{width:28mm;height:28mm}.lb-l .lb-top svg{width:32mm;height:32mm}.lb-m .lb-ref,.lb-l .lb-ref{font-size:14px}.lb-m .lb-meta,.lb-l .lb-meta{font-size:12px}.lb-l .lb-bar svg{height:16mm}.lb-m .lb-bar svg{height:13mm}
+.lb-org{font-weight:700;font-size:13px;border-bottom:1px solid #000;margin-bottom:2mm;padding-bottom:1mm}
+@page label-m{size:90mm 55mm;margin:2mm}@page label-l{size:100mm 70mm;margin:2mm}
+@media print{.lb-grid{display:block}.label-sheet{break-after:page;margin:0}}

@@ -134,13 +134,13 @@ function shell(content, taskCount) {
   const role = state.user.role, leader = ["admin", "manager"].includes(role), reports = isStaff() || can("export");
   const GROUPS = [
     { id: "home", title: "🏠 الرئيسية", items: [["#/dashboard", "لوحة التحكم"], ["#/tasks", "مهامي"], ...(leader ? EXEC_NAV : [])] },
-    { id: "mail", title: "✉️ المراسلات", items: [["#/new", "تسجيل مراسلة جديدة"], ["#/list?direction=incoming", "الوارد"], ["#/list?direction=outgoing", "الصادر"], ["#/list", "المعاملات"], ["#/search", "بحث متقدم"]] },
+    { id: "mail", title: "✉️ المراسلات", items: [["#/new", "تسجيل مراسلة جديدة"], ["#/list?direction=incoming", "الوارد"], ["#/list?direction=outgoing", "الصادر"], ["#/list", "المعاملات"], ["#/search", "بحث متقدم"], ...(isStaff() ? [["#/scan", "المسح والاستلام"]] : [])] },
     { id: "follow", title: "📊 المتابعة والتقارير", items: [["#/notifications", "الإشعارات"], ["#/delegation", "التفويض"], ...(reports ? REPORT_NAV : [])] },
     ...(role === "admin" ? [
       { id: "adm1", title: "🏢 الهيكل والصلاحيات", items: [["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/perms", "الصلاحيات"], ["#/admin/security", "سياسات الأمان"]] },
       { id: "adm2", title: "🗂 التصنيف والمسارات", items: [["#/admin/classes", "التصنيفات والخصوصية"], ["#/admin/folders", "المجلدات"], ["#/admin/types", "أنواع المعاملات"], ["#/admin/directives", "توجيهات الإسناد"],
         ["#/admin/workflows", "مسارات العمل"], ["#/admin/rules", "قواعد التوجيه"], ["#/admin/templates", "القوالب"], ["#/admin/sla", "اتفاقيات الخدمة SLA"]] },
-      { id: "adm3", title: "⚙️ التشغيل والحوكمة", items: [["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/branding", "الهوية والترويسة"],
+      { id: "adm3", title: "⚙️ التشغيل والحوكمة", items: [["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/branding", "الهوية والترويسة"], ["#/admin/files", "الملفات والمسح"],
         ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]] },
     ] : []),
     { id: "me", title: "👤 حسابي", items: [["#/about", "من نحن"], ["#/security", "الأمان والتفضيلات"]] },
@@ -576,6 +576,7 @@ async function newView(q) {
       const r = await api("/correspondences", { method: "POST", body });
       const file = form.file.files[0];
       if (file) await upload(r.id, file);
+      else if (q.get("scan")) { try { await api(`/scan/inbox/${q.get("scan")}/attach`, { method: "POST", body: { corr_id: r.id } }); } catch (se) { toast("سُجّلت المراسلة لكن تعذّر إرفاق الملف الممسوح: " + se.message, true); } }
       for (const ref of dupLinks) { try { await api(`/correspondences/${r.id}/related`, { method: "POST", body: { ref_no: ref } }); } catch { /* الربط اختياري */ } }
       if (wfPick && wfPick.value && !body.draft) {
         try { await api(`/correspondences/${r.id}/workflow`, { method: "POST", body: { workflow_id: Number(wfPick.value) } }); }
@@ -619,7 +620,7 @@ async function newView(q) {
       row("ملاحظات التسليم", h("textarea", { name: "delivery_notes", maxlength: 1000, placeholder: "ملاحظات التسليم" }))),
     err, h("div", { class: "fm-actions" }, h("button", { class: "btn" }, "حفظ"), h("button", { type: "button", class: "btn ghost", onclick: () => { asDraft = true; form.requestSubmit(); } }, "حفظ كمسودة"), h("a", { class: "btn ghost", href: "#/list" }, "إلغاء")));
   syncDir();
-  return [title, form];
+  return [title, q.get("scan") ? h("div", { class: "card" }, "📎 سيُرفق الملف الممسوح من صندوق المسح تلقائيًا بعد الحفظ (ما لم تختر ملفًا آخر).") : null, form];
 }
 let fieldSeq = 0;
 function f(label, input, req, cls) {
