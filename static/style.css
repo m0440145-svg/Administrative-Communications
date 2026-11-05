@@ -265,3 +265,15 @@ table.mail input[type=checkbox]{width:auto}
   main{padding:16px}
 }
 @media print{.side,.btn,.toolbar,#toast{display:none!important}.shell{display:block}main{padding:0}}
+
+/* قوائم القائمة الجانبية المنسدلة */
+.navgroup{margin:2px 0;border-radius:8px}
+.navgroup>summary{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-radius:8px;color:#fff;font-weight:600;user-select:none}
+.navgroup>summary::-webkit-details-marker{display:none}
+.navgroup>summary::after{content:"‹";transition:transform .2s;opacity:.7;margin-inline-start:8px}
+.navgroup[open]>summary::after{transform:rotate(-90deg)}
+.navgroup>summary:hover{background:rgba(255,255,255,.1)}
+.navgroup.has-active>summary{background:rgba(255,255,255,.14)}
+.navitems{display:flex;flex-direction:column;padding:2px 10px 6px 0;margin-inline-start:10px;border-inline-start:2px solid rgba(255,255,255,.18)}
+.navitems a{font-size:14px;padding:6px 12px}
+.navgroup>summary>span:first-child{flex:1}

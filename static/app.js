@@ -130,11 +130,34 @@ function applyTheme(t) {
 
 function shell(content, taskCount) {
   const cur = location.hash || "#/dashboard";
-  const items = [...NAV, ...(["admin", "manager"].includes(state.user.role) ? EXEC_NAV : []), ...(isStaff() || can("export") ? REPORT_NAV : []), ...(state.user.role === "admin" ? ADMIN_NAV : [])].map(([href, label]) =>
-    href === "sep" ? h("div", { class: "sep" }, label)
-      : h("a", { href, class: cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?")) ? "active" : "" },
-        label, href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null,
-        href === "#/notifications" ? h("span", { class: "badge-n", id: "notif-badge", hidden: !state.unread }, state.unread || "") : null));
+  // قوائم منسدلة (مجموعات قابلة للطيّ): تُحفظ حالة كل مجموعة، وتُفتح تلقائيًا المجموعة التي فيها الصفحة الحالية
+  const role = state.user.role, leader = ["admin", "manager"].includes(role), reports = isStaff() || can("export");
+  const GROUPS = [
+    { id: "home", title: "🏠 الرئيسية", items: [["#/dashboard", "لوحة التحكم"], ["#/tasks", "مهامي"], ...(leader ? EXEC_NAV : [])] },
+    { id: "mail", title: "✉️ المراسلات", items: [["#/new", "تسجيل مراسلة جديدة"], ["#/list?direction=incoming", "الوارد"], ["#/list?direction=outgoing", "الصادر"], ["#/list", "المعاملات"], ["#/search", "بحث متقدم"]] },
+    { id: "follow", title: "📊 المتابعة والتقارير", items: [["#/notifications", "الإشعارات"], ["#/delegation", "التفويض"], ...(reports ? REPORT_NAV : [])] },
+    ...(role === "admin" ? [
+      { id: "adm1", title: "🏢 الهيكل والصلاحيات", items: [["#/admin/units", "الوحدات"], ["#/admin/staff", "الموظفون"], ["#/admin/perms", "الصلاحيات"], ["#/admin/security", "سياسات الأمان"]] },
+      { id: "adm2", title: "🗂 التصنيف والمسارات", items: [["#/admin/classes", "التصنيفات والخصوصية"], ["#/admin/folders", "المجلدات"], ["#/admin/types", "أنواع المعاملات"], ["#/admin/directives", "توجيهات الإسناد"],
+        ["#/admin/workflows", "مسارات العمل"], ["#/admin/rules", "قواعد التوجيه"], ["#/admin/templates", "القوالب"], ["#/admin/sla", "اتفاقيات الخدمة SLA"]] },
+      { id: "adm3", title: "⚙️ التشغيل والحوكمة", items: [["#/admin/retention", "الاحتجاز والإتلاف"], ["#/admin/channels", "قنوات الإشعار"], ["#/admin/schedules", "التقارير المجدولة"], ["#/admin/branding", "الهوية والترويسة"],
+        ["#/admin/ops", "النسخ والسلامة"], ["#/admin/import", "الاستيراد"], ["#/admin/audit", "سجل الإجراءات"], ["#/admin/integration", "التكامل (API)"]] },
+    ] : []),
+    { id: "me", title: "👤 حسابي", items: [["#/security", "الأمان والتفضيلات"]] },
+  ];
+  let navState = {};
+  try { navState = JSON.parse(localStorage.getItem("acp_nav") || "{}"); } catch { /* */ }
+  const isActive = (href) => cur === href || (!href.includes("?") && cur.split("?")[0] === href && !cur.includes("?"));
+  const items = GROUPS.map((g) => {
+    const hasActive = g.items.some(([href]) => isActive(href));
+    const open = hasActive || (navState[g.id] !== undefined ? navState[g.id] : ["home", "mail"].includes(g.id));
+    const badge = g.id === "home" && taskCount ? taskCount : g.id === "follow" && state.unread ? state.unread : 0;
+    return h("details", { class: "navgroup" + (hasActive ? " has-active" : ""), open, ontoggle: (e) => { navState[g.id] = e.target.open; try { localStorage.setItem("acp_nav", JSON.stringify(navState)); } catch { /* */ } } },
+      h("summary", {}, h("span", {}, g.title), badge ? h("span", { class: "badge-n" }, badge) : null),
+      h("div", { class: "navitems" }, g.items.map(([href, label]) => h("a", { href, class: isActive(href) ? "active" : "" }, label,
+        href === "#/tasks" && taskCount ? h("span", { class: "badge-n" }, taskCount) : null,
+        href === "#/notifications" ? h("span", { class: "badge-n", id: "notif-badge", hidden: !state.unread }, state.unread || "") : null))));
+  });
   const saved = state.filters.length ? [h("div", { class: "sep" }, "فلاتري المحفوظة"), ...state.filters.map((fl) => h("div", { class: "savedf" },
     h("a", { href: (fl.kind === "report" ? "#/reports?" : "#/list?") + fl.query }, fl.name),
     h("button", { class: "x", title: "حذف الفلتر", "aria-label": "حذف الفلتر " + fl.name, onclick: async () => { try { await api("/me/filters/" + fl.id, { method: "DELETE" }); await loadRefs(); render(); } catch (e) { toast(e.message, true); } } }, "×")))] : [];
